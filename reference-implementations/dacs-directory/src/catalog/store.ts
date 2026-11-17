@@ -1188,6 +1188,20 @@ export function recordArtifact(observation: ArtifactObservation): void {
     status: observation.status ?? "observed", dataJson, rejected: rejected ? 1 : 0 });
 }
 
+/**
+ * Call only after a current read returns a marker-shaped object. Close the
+ * scanner's marker-absent failure without replacing an earlier observation;
+ * the candidate verifier still decides the withdrawal independently.
+ */
+export const recoverMissingWithdrawalMarkerRead = db.transaction((locator: string): void => {
+  const changed = db.prepare(`UPDATE artifacts SET
+    kind=CASE WHEN kind='unknown' THEN 'listing-revocation' ELSE kind END,
+    status='observed', error_code=NULL, error_message=NULL, retry_count=0,
+    next_retry_at=NULL, rejection_count=0, deferred_at=NULL
+    WHERE locator=? AND error_code='STORAGE_WITHDRAWAL_MARKER_ABSENT'`).run(locator).changes;
+  if (changed) db.prepare("DELETE FROM dead_letters WHERE locator=? AND error_code='STORAGE_WITHDRAWAL_MARKER_ABSENT'").run(locator);
+});
+
 export interface ConsensusAnchorObservation {
   locator: string;
   contentHash: string;
@@ -1491,6 +1505,7 @@ const PUBLIC_FAILURES: Record<string, string> = {
   STORAGE_NOT_PUBLIC: "A storage program exists at this locator but is not publicly readable. Publish it for unauthenticated reads before retrying.",
   STORAGE_RPC_UNAVAILABLE: "The storage program could not be read because the public node was unavailable after bounded retries.",
   STORAGE_INVALID_RESPONSE: "The public node returned a response that did not satisfy the storage-read contract after bounded retries.",
+  STORAGE_WITHDRAWAL_MARKER_ABSENT: "A storage read succeeded without the withdrawal marker carried by its confirmed CREATE. This records that read, not the current withdrawal status of any listing.",
 };
 const DACS_ARTIFACT_KINDS = new Set(["listing", "listing-revocation", "bundle", "agreement", "evidence", "verify-result", "composite", "rating"]);
 

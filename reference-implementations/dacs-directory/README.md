@@ -296,9 +296,21 @@ DACS artifact; it does not attribute a publishing failure to an agent. Raw excep
 payloads, internal URLs and stack traces are never returned.
 
 Storage-read diagnostics distinguish `STORAGE_NOT_FOUND`, `STORAGE_NOT_PUBLIC`,
-`STORAGE_RPC_UNAVAILABLE`, `STORAGE_INVALID_RESPONSE`, and `ARTIFACT_REJECTED`. Missing and non-public
+`STORAGE_RPC_UNAVAILABLE`, `STORAGE_INVALID_RESPONSE`, `STORAGE_WITHDRAWAL_MARKER_ABSENT`,
+and `ARTIFACT_REJECTED`. Missing and non-public
 locators are terminal until a later chain replay observes them again; transient node
-and response failures retain bounded retries. `ARTIFACT_REJECTED` means the content was
+and response failures retain bounded retries. `STORAGE_WITHDRAWAL_MARKER_ABSENT` means a
+successful read lacked a marker carried by its confirmed CREATE. Its artifact retry
+limit is 1: a fresh failure is immediately dead-lettered. The separate withdrawal
+candidate queue retains its holds and retries. If an admitted candidate is visited
+by an indexed listing's withdrawal check, a current marker-shaped read clears only
+this failure state, preserving the earlier artifact observation. Signature and
+listing-binding verification still decide the withdrawal. Unqueued markers
+(including invalid signatures) and candidates for listings not being indexed do
+not get that read; their entries can persist until a chain replay observes the
+locator again. These entries describe a storage read, not a listing's current
+withdrawal status.
+`ARTIFACT_REJECTED` means the content was
 read but fails the artifact policy (oversized, a DACS-named program without object data,
 or no canonical JSON form). It has its own retry class: it is never dead-lettered, it is
 retried with backoff while at most 1,000 rejected locators are active, and the

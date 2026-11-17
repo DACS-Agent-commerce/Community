@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,rmSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import Database from 'better-sqlite3';
@@ -170,24 +170,27 @@ test('a saved catalog from an earlier build serves no retired coverage fields',a
 // marker, and its anchor joins the candidate queue under the seller, which holds the Listing until
 // a read returns a marker there. The node reports the transaction, so a forged value, another
 // key's CREATE or an address that does not derive from its inputs holds nothing.
-async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;nonceText?:boolean;forge?:boolean;emptyRead?:boolean;objectRead?:boolean;marker?:(f:Awaited<ReturnType<typeof fixture>>)=>Record<string,unknown>}){
+async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;nonceText?:boolean;forge?:boolean;emptyRead?:boolean;objectRead?:boolean;invalidRead?:boolean;unindexed?:boolean;marker?:(f:Awaited<ReturnType<typeof fixture>>)=>Record<string,unknown>}){
  const f=await fixture();const {deriveStorageAddress}=await import('../src/catalog/chain.js');
  const owner='0x'+claim.slice(-64);const from=opts.from??owner;const nonce=100+(++seq);const programName='dacs1-revoked:fixture'; // a fresh nonce gives each case its own address
  const derived=deriveStorageAddress(from,programName,nonce,'');const markerRef=opts.to?opts.to(derived):derived;
+ const carriedMarker=opts.forge?{...f.marker,signature:{...(f.marker.signature as Record<string,unknown>),value:'A'.repeat(86)}}:opts.marker?.(f)??f.marker;
  const content=JSON.stringify({type:'storageProgram',from,to:markerRef,amount:0,nonce:opts.nonceText?String(nonce):nonce,timestamp:1,
   data:['storageProgram',{operation:'CREATE_STORAGE_PROGRAM',storageAddress:markerRef,programName,encoding:'json',
-  data:opts.forge?{...f.marker,signature:{...(f.marker.signature as Record<string,unknown>),value:'A'.repeat(86)}}:opts.marker?.(f)??f.marker,acl:{mode:'public'},salt:'',storageLocation:'onchain'}]});
+  data:carriedMarker,acl:{mode:'public'},salt:'',storageLocation:'onchain'}]});
  const tx={id:3,to:markerRef,status:'confirmed',type:'storageProgram',blockNumber:3,hash:'ab'.repeat(32),content};
  seedScanState({schemaVersion:10,chainIdentity:PINNED_DEMOS_CHAIN_IDENTITY,lastSeenTxId:0,listings:{},deals:{}});
- store.saveRegistrations([{primaryClaim:claim,displayName:'fixture',listingAnchors:[anchor]}]);
- const old=globalThis.fetch;let recovered=false;
+ store.saveRegistrations(opts.unindexed?[]:[{primaryClaim:claim,displayName:'fixture',listingAnchors:[anchor]}]);
+ const old=globalThis.fetch;let recovered=false;let reads=0;
  globalThis.fetch=async(input,init)=>{
   if(init?.method==='POST') return Response.json({result:200,response:[{id:5},{id:4},tx,{id:2},{id:1}]});
   const locator=String(input).split('/').at(-1);
+  if(locator===markerRef)reads++;
   if(locator===anchor) return Response.json({success:true,owner,programName:'dacs1:listing:fixture',data:f.listing});
-  if(locator===markerRef && recovered) return Response.json({success:true,owner:from,programName,data:f.marker});
+  if(locator===markerRef && recovered) return Response.json({success:true,owner:from,programName,data:carriedMarker});
   if(locator===markerRef && opts.emptyRead) return Response.json({success:true,owner:from,programName,data:null});
   if(locator===markerRef && opts.objectRead) return Response.json({success:true,owner:from,programName,data:{}});
+  if(locator===markerRef && opts.invalidRead) return new Response('{malformed JSON');
   return new Response('',{status:503});
  };
  const {reindexAll}=await import('../src/catalog/reindexCore.js');
@@ -196,26 +199,24 @@ async function unreadCreatePass(opts:{from?:string;to?:(derived:string)=>string;
  const firstFetch=globalThis.fetch;
  const due=()=>{const db=new Database(join(root,'directory.sqlite'));
   // Test-only: make the artifact and candidate retries due now instead of after their backoff.
-  try{db.prepare("UPDATE artifacts SET status='retry',next_retry_at=0 WHERE locator=?").run(markerRef);
-   db.prepare("DELETE FROM revocation_candidate_retries WHERE locator=?").run(markerRef);}finally{db.close();}};
+  try{db.prepare("UPDATE artifacts SET next_retry_at=0 WHERE locator=? AND status='retry'").run(markerRef);
+   db.prepare("UPDATE revocation_candidate_retries SET retry_after=0 WHERE locator=?").run(markerRef);}finally{db.close();}};
+ const run=async(cursor?:number,readable?:boolean)=>{
+  due();
+  if(cursor!==undefined)store.saveScanState({...store.loadScanState(),lastSeenTxId:cursor});
+  if(readable!==undefined)recovered=readable;
+  const previous=globalThis.fetch;globalThis.fetch=firstFetch;
+  try{await reindexAll(opts2);return row();}finally{globalThis.fetch=previous;}
+ };
  try{
   await reindexAll(opts2);const first=row();
-  return {first,hash:f.hash,markerRef,again:async()=>{
-   due();store.saveScanState({...store.loadScanState(),lastSeenTxId:10});
-   const prev=globalThis.fetch;globalThis.fetch=firstFetch;
-   try{await reindexAll(opts2);return row();}finally{globalThis.fetch=prev;}
-  },recover:async()=>{
-   due();store.saveScanState({...store.loadScanState(),lastSeenTxId:10});recovered=true;
-   globalThis.fetch=async(input,init)=>{
-    if(init?.method==='POST') return Response.json({result:200,response:[{id:5},{id:4},tx,{id:2},{id:1}]});
-    const locator=String(input).split('/').at(-1);
-    if(locator===anchor) return Response.json({success:true,owner,programName:'dacs1:listing:fixture',data:f.listing});
-    if(locator===markerRef) return Response.json({success:true,owner:from,programName,data:f.marker});
-    return new Response('',{status:503});
-   };
-   try{await reindexAll(opts2);return row();}finally{globalThis.fetch=old;}
-  }};
- }finally{if(!recovered)globalThis.fetch=old;}
+  return {first,hash:f.hash,markerRef,reads:()=>reads,again:()=>run(10),recover:()=>run(10,true),replay:()=>run(0),
+   recoverAfterFailure:()=>run(undefined,true),fail:async()=>{
+    const previous=globalThis.fetch;
+    globalThis.fetch=async()=>Response.json({result:503,response:null});
+    try{await assert.rejects(reindexAll(opts2),/chain scan/);}finally{globalThis.fetch=previous;}
+   }};
+ }finally{globalThis.fetch=old;}
 }
 test('owner-created marker that cannot be read holds the listing, then revokes it once read',async()=>{
  const pass=await unreadCreatePass({});
@@ -231,14 +232,137 @@ test('a storage reply that succeeds without the carried marker still holds the l
 });
 const candidateRows=(hash:string)=>{const db=new Database(join(root,'directory.sqlite'));
  try{return db.prepare("SELECT locator, owner, state, carried FROM revocation_candidates WHERE listing_hash=? ORDER BY seq").all(hash) as Array<{locator:string;owner:string|null;state:string;carried:number}>;}finally{db.close();}};
+const candidateAttempts=(hash:string,locator:string)=>{const db=new Database(join(root,'directory.sqlite'));
+ try{return (db.prepare("SELECT attempts FROM revocation_candidate_retries WHERE listing_hash=? AND locator=?")
+  .get(hash,locator) as {attempts:number}|undefined)?.attempts;}finally{db.close();}};
 const sellerOwner='0x'+claim.slice(-64);
 test('a storage reply with an object that is not a marker still holds the listing, pass after pass',async()=>{
  const pass=await unreadCreatePass({objectRead:true});
  assert.equal(pass.first,undefined,'an empty object has not settled the carried marker');
+ const diagnostic=store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.items[0];
+ assert.equal(diagnostic?.code,'STORAGE_WITHDRAWAL_MARKER_ABSENT');
+ assert.equal(diagnostic.attempts,1,'stable scan failures dead-letter on their first attempt');
+ assert.ok(!store.loadRetryableArtifacts(Date.now()+60_000).includes(pass.markerRef));
  assert.deepEqual(candidateRows(pass.hash),[{locator:pass.markerRef,owner:sellerOwner,state:'pending',carried:1}]);
+ assert.equal(candidateAttempts(pass.hash,pass.markerRef),1);
  assert.equal(await pass.again(),undefined,'the indexer reads {} too, and the candidate stays unread');
  assert.equal(candidateRows(pass.hash)[0]?.state,'pending');
+ assert.equal(candidateAttempts(pass.hash,pass.markerRef),2,'the separate withdrawal candidate keeps retrying');
+ assert.equal(store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.items[0]?.attempts,1,
+  'the candidate retry does not revive the exhausted artifact retry');
  assert.equal((await pass.recover())?.status,'revoked');
+});
+
+test('failed and malformed marker reads keep five artifact attempts and independent withdrawal holds',async()=>{
+ for(const invalidRead of [false,true]){
+  const pass=await unreadCreatePass({invalidRead});
+  assert.equal(pass.first,undefined);
+  for(let attempt=1;attempt<5;attempt++){
+   assert.equal(store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.returned,0,
+    `attempt ${attempt} is still retryable`);
+   assert.ok(store.loadRetryableArtifacts(Date.now()+3_600_000).includes(pass.markerRef));
+   assert.equal(await pass.again(),undefined);
+  }
+  const diagnostic=store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.items[0];
+  assert.equal(diagnostic?.code,invalidRead?'STORAGE_INVALID_RESPONSE':'STORAGE_RPC_UNAVAILABLE');
+  assert.equal(diagnostic.attempts,5);
+  assert.equal(candidateRows(pass.hash)[0]?.state,'pending');
+  assert.equal((await pass.recover())?.status,'revoked');
+ }
+});
+
+for(const [reply,options] of [['object',{objectRead:true}],['null',{emptyRead:true}]] as const){
+ test(`a settled carried withdrawal leaves no exhausted storage diagnostic at its anchor (${reply})`,async()=>{
+  const pass=await unreadCreatePass(options);
+  assert.equal(pass.first,undefined);
+  assert.equal(await pass.again(),undefined);
+  assert.equal(store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.returned,1);
+  assert.equal((await pass.recover())?.status,'revoked');
+
+  const {GET}=await import('../app/api/dacs/status/route.js');
+  const {NextRequest}=await import('next/server');
+  const old=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({result:200,response:[{id:10}]});
+  try{
+   const response=await GET(new NextRequest(`https://fixture.test/api/dacs/status?locator=${pass.markerRef}`));
+   assert.equal(response.status,200);
+   const body=await response.json();
+   assert.equal(body.indexer.deadLetterDiagnostics.returned,0,'a current marker read closes the exhausted diagnostic');
+  }finally{globalThis.fetch=old;}
+  assert.equal((await pass.again())?.status,'revoked');
+  assert.equal(store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.returned,0);
+ });
+}
+
+for(const [name,options] of [['forged',{forge:true,objectRead:true}],['unindexed',{unindexed:true,objectRead:true}]] as const){
+ test(`a ${name} carried marker keeps its read diagnostic until a chain replay observes it`,async()=>{
+  const pass=await unreadCreatePass(options);
+  assert.equal(candidateRows(pass.hash).length,name==='forged'?0:1);
+  assert.equal(store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.items[0]?.code,'STORAGE_WITHDRAWAL_MARKER_ABSENT');
+  await pass.recover();
+  const diagnostic=store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.items[0];
+  assert.equal(diagnostic?.code,'STORAGE_WITHDRAWAL_MARKER_ABSENT');
+  assert.equal(diagnostic.attempts,1);
+  assert.doesNotMatch(diagnostic.message,/remains unresolved|Verification runs separately|read clears/);
+  await pass.again();
+  assert.equal(store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.returned,1);
+  await pass.replay();
+  assert.equal(store.indexerDiagnostics().lastRun?.from_tx,0);
+  assert.equal(store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.returned,0);
+ });
+}
+
+test('a failed pass forces a replay that can recover an unvisited carried marker',async()=>{
+ const pass=await unreadCreatePass({objectRead:true,unindexed:true});
+ assert.equal(store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.returned,1);
+ await pass.fail();
+ assert.equal(store.indexerDiagnostics().lastRun?.status,'failed');
+ await pass.recoverAfterFailure();
+ assert.equal(store.indexerDiagnostics().lastRun?.from_tx,0);
+ assert.equal(store.indexerDiagnostics({deadLetterLocator:pass.markerRef}).deadLetterDiagnostics.returned,0);
+});
+
+test('carried marker lifecycle matrix preserves listing outcomes across diagnostic recovery paths',async()=>{
+ const trace:Array<{scenario:string;step:string;listingStatus:string;storageReadable:boolean;markerReads:number;codes:string[];attempts:number[];listingRejections:string[];fromTx:number|null}>=[];
+ const cases:Array<{name:string;options:Parameters<typeof unreadCreatePass>[0];retries:number}>=[
+  {name:'object',options:{objectRead:true},retries:2},
+  {name:'null',options:{emptyRead:true},retries:2},
+  {name:'forged',options:{forge:true,objectRead:true},retries:2},
+  {name:'unindexed',options:{unindexed:true,objectRead:true},retries:2},
+  {name:'rpc',options:{},retries:4},
+  {name:'malformed',options:{invalidRead:true},retries:4},
+ ];
+ const reset=()=>{store.clearChainDerivedArtifacts();store.saveCatalog({catalogVersion:'1',generatedAt:0,sellers:[]});};
+ const snapshot=(scenario:string,step:string,pass:Awaited<ReturnType<typeof unreadCreatePass>>,storageReadable:boolean)=>{
+  const diagnostics=store.indexerDiagnostics({deadLetterLocator:pass.markerRef});
+  const row=store.loadCatalog().sellers.flatMap(s=>s.listings).find(l=>l.contentHash===pass.hash);
+  trace.push({scenario,step,listingStatus:row?.status??'absent',storageReadable,markerReads:pass.reads(),
+   codes:diagnostics.deadLetterDiagnostics.items.map(i=>i.code),attempts:diagnostics.deadLetterDiagnostics.items.map(i=>i.attempts),
+   listingRejections:diagnostics.listingRejectionDiagnostics.items.map(i=>i.code),fromTx:diagnostics.lastRun?.from_tx??null});
+ };
+ for(const item of cases){
+  reset();const pass=await unreadCreatePass(item.options);snapshot(item.name,'initial',pass,false);
+  for(let i=1;i<=item.retries;i++){await pass.again();snapshot(item.name,`ordinary-${i}`,pass,false);}
+  const recovered=await pass.recover();snapshot(item.name,'readable',pass,true);
+  assert.equal(recovered?.status,item.options.unindexed?undefined:item.options.forge?'active':'revoked');
+  await pass.again();snapshot(item.name,'ordinary-readable',pass,true);
+  await pass.replay();snapshot(item.name,'replay',pass,true);
+ }
+ for(const item of cases.filter(i=>['object','forged','unindexed'].includes(i.name))){
+  reset();const pass=await unreadCreatePass(item.options);const name=`failed-${item.name}`;
+  snapshot(name,'initial',pass,false);await pass.again();snapshot(name,'ordinary',pass,false);
+  await pass.fail();snapshot(name,'failed',pass,false);
+  const after=await pass.recoverAfterFailure();snapshot(name,'replayed-readable',pass,true);
+  assert.equal(store.indexerDiagnostics().lastRun?.from_tx,0);
+  assert.equal(after?.status,item.options.unindexed?undefined:item.options.forge?'active':'revoked');
+  await pass.again();snapshot(name,'ordinary-readable',pass,true);
+ }
+ reset();const repeated=await unreadCreatePass({objectRead:true});snapshot('repeated-replay','initial',repeated,false);
+ for(let i=1;i<=4;i++){await repeated.replay();snapshot('repeated-replay',`replay-${i}`,repeated,false);}
+ assert.equal((await repeated.recover())?.status,'revoked');snapshot('repeated-replay','readable',repeated,true);
+ await repeated.replay();snapshot('repeated-replay','replay-readable',repeated,true);
+ assert.equal(trace.length,62);
+ if(process.env.DACS_TEST_MATRIX_OUTPUT)writeFileSync(process.env.DACS_TEST_MATRIX_OUTPUT,JSON.stringify(trace,null,2)+'\n');
 });
 test('a carried marker over the artifact size bound is not queued',async()=>{
  const big=(f:Awaited<ReturnType<typeof fixture>>)=>{
@@ -256,7 +380,19 @@ test('a carried marker verified from a stored observation revokes the listing',a
  try{db.prepare("INSERT INTO artifacts(locator,kind,profile,owner,observed_at,status,data_json) VALUES (?,'listing-revocation','dacs-v0.1',?,1,'observed',?)")
   .run(locator,sellerOwner,JSON.stringify(f.marker));}finally{db.close();}
  store.admitRevocationCandidates(f.hash,[{locator,owner:sellerOwner,carried:true}]);
+ store.recordArtifactFailure(locator,'listing-revocation','STORAGE_WITHDRAWAL_MARKER_ABSENT','earlier marker-less read',1);
  assert.equal((await f.index(new Map())).listings[0]?.status,'revoked');
+ assert.equal(store.indexerDiagnostics({deadLetterLocator:locator}).deadLetterDiagnostics.returned,1,
+  'cached marker bytes are not a current storage read and cannot close its diagnostic');
+});
+test('a current rejected marker read closes its storage diagnostic without authenticating a withdrawal',async()=>{
+ const f=await fixture();const locator='stor-'+(7150).toString(16).padStart(40,'0');
+ store.admitRevocationCandidates(f.hash,[{locator,owner:sellerOwner,carried:true}]);
+ store.recordArtifactFailure(locator,'unknown','STORAGE_WITHDRAWAL_MARKER_ABSENT','earlier marker-less read',1);
+ const invalid={...f.marker,signature:{...(f.marker.signature as Record<string,unknown>),value:'A'.repeat(86)}};
+ assert.equal((await f.index(new Map([[locator,invalid]]))).listings[0]?.status,'active');
+ assert.equal(candidateRows(f.hash)[0]?.state,'rejected','the signature still decides the withdrawal');
+ assert.equal(store.indexerDiagnostics({deadLetterLocator:locator}).deadLetterDiagnostics.returned,0);
 });
 test('a CREATE whose nonce the node reports as text still holds the listing',async()=>{
  const pass=await unreadCreatePass({nonceText:true});

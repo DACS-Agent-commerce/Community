@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { contentHash } from "@kynesyslabs/dacs/canonical";
 import { publicKeyFromSeed, rawPublicKey } from "@kynesyslabs/dacs/crypto";
+import { deriveStorageAddress } from "../src/catalog/chain.js";
 
 import {
   collectNativeStorageAddresses,
@@ -66,6 +67,39 @@ async function scanFixture(transactions: unknown[], storage: Record<string, stri
     else process.env.DACS_SCAN_FINALITY_DEPTH = originalDepth;
   }
 }
+
+test("only a successful read missing a carried marker gets the marker-absent code", async () => {
+  const from = `0x${signerDid.slice(-64)}`;
+  const programName = "withdrawal-fixture";
+  const address = deriveStorageAddress(from, programName, 1, "");
+  const create = { id: 1, status: "confirmed", type: "storageProgram", to: address,
+    content: JSON.stringify({ type: "storageProgram", from, to: address, nonce: 1,
+      data: ["storageProgram", { operation: "CREATE_STORAGE_PROGRAM", storageAddress: address,
+        programName, salt: "", data: marker }] }) };
+
+  for (const data of ["{}", "null"]) {
+    const result = await scanFixture([create], { [address]: data });
+    assert.equal(result.complete, true);
+    assert.deepEqual(result.failures.map(({ locator, code }) => ({ locator, code })),
+      [{ locator: address, code: "STORAGE_WITHDRAWAL_MARKER_ABSENT" }]);
+    assert.deepEqual(result.unreadRevocationMarkers.get(marker.listingContentHash), [{ locator: address, marker }]);
+  }
+
+  const ordinary = await scanFixture([memo(1, address)], { [address]: "{}" });
+  assert.deepEqual(ordinary.failures, []);
+  assert.equal(ordinary.unreadRevocationMarkers.size, 0);
+  const readable = await scanFixture([create], { [address]: JSON.stringify(marker) });
+  assert.deepEqual(readable.failures, []);
+  assert.deepEqual(readable.revocations.get(marker.listingContentHash), [address]);
+  for (const [storage, expected] of [
+    [{}, "STORAGE_NOT_FOUND"],
+    [{ [address]: "{malformed JSON" }, "STORAGE_INVALID_RESPONSE"],
+  ] as const) {
+    const result = await scanFixture([create], storage);
+    assert.equal(result.failures[0]?.code, expected);
+    assert.equal(result.unreadRevocationMarkers.get(marker.listingContentHash)?.length, 1);
+  }
+});
 
 for (const malformed of [false, true]) {
   test(`scanner parses ${malformed ? "malformed" : "valid"} storage transaction content once`, async (t) => {

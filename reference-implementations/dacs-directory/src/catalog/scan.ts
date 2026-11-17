@@ -561,7 +561,7 @@ export async function scanChain(
       failures.push({
         locator: address,
         kind: "unknown",
-        code: read?.failureCode ?? "STORAGE_INVALID_RESPONSE",
+        code: carriedUnresolved ? "STORAGE_WITHDRAWAL_MARKER_ABSENT" : read?.failureCode ?? "STORAGE_INVALID_RESPONSE",
         message: carriedUnresolved
           ? "storage program read returned no withdrawal marker where its confirmed CREATE carried one"
           : "storage program could not be read under the public indexer policy",
