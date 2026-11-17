@@ -59,6 +59,13 @@ export async function GET(req: NextRequest) {
         { status: 503 },
       );
     }
+    // A malformed locator is classified absent locally, without asking the node.
+    if (!/^stor-[0-9a-f]{40}$/.test(candidate.locator)) {
+      return NextResponse.json(
+        { error: `listing anchor for ${candidate.listingId} is not a storage-program address; the index cannot be generated from chain state` },
+        { status: 422 },
+      );
+    }
     const read = await readAnchorResult(candidate.locator, req.signal);
     if (req.signal.aborted || Date.now() >= deadline) {
       return NextResponse.json(
