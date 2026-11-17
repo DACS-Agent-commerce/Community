@@ -51,12 +51,19 @@ export function cursorStallThresholdSeconds(
  * the settled tip and the cursor has not advanced for at least the threshold;
  * transactions still waiting to become final are not a stall. `cursorStalled`
  * is null when the settled tip or the time of the last advance is unknown.
+ *
+ * `finalAfter` says that the ids above `aboveId` became final only at `atMs`
+ * (local time), when the tip had been unchanged long enough. If the cursor is
+ * already at `aboveId` or beyond, the stall count starts at the later of the
+ * last advance and `atMs`, so a transaction that has only just become final is
+ * not a stall until the threshold has passed since it did.
  */
 export function cursorProgressDiagnostics(
   scan: { lastSeenTxId: number; cursorAdvancedAt?: number },
   settledTip: number | null,
   now = Date.now(),
   stallThresholdSeconds = cursorStallThresholdSeconds(),
+  finalAfter?: { aboveId: number; atMs: number },
 ): {
   cursorAdvancedAt: number | null;
   secondsSinceCursorAdvanced: number | null;
@@ -69,13 +76,17 @@ export function cursorProgressDiagnostics(
   const secondsSinceCursorAdvanced = cursorAdvancedAt === null
     ? null
     : Math.max(0, Math.floor((now - cursorAdvancedAt) / 1_000));
+  const stallStart = cursorAdvancedAt !== null && finalAfter !== undefined && scan.lastSeenTxId >= finalAfter.aboveId
+    ? Math.max(cursorAdvancedAt, finalAfter.atMs)
+    : cursorAdvancedAt;
+  const secondsStalled = stallStart === null ? null : Math.max(0, Math.floor((now - stallStart) / 1_000));
   const cursorStalled = settledTip === null
     ? null
     : settledTip <= scan.lastSeenTxId
       ? false
-      : secondsSinceCursorAdvanced === null
+      : secondsStalled === null
         ? null
-        : secondsSinceCursorAdvanced >= stallThresholdSeconds;
+        : secondsStalled >= stallThresholdSeconds;
   return {
     cursorAdvancedAt,
     secondsSinceCursorAdvanced,

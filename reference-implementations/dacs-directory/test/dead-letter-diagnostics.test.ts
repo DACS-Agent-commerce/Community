@@ -184,6 +184,14 @@ test("cursor progress diagnostics distinguish caught-up, stalled, and unknown cu
     now,
     60,
   ).cursorStalled, false);
+  const finalAt = (secondsAgo: number) => ({ aboveId: 10, atMs: now - secondsAgo * 1_000 });
+  const aged = { lastSeenTxId: 10, cursorAdvancedAt: now - 3_600_000 };
+  assert.equal(cursorProgressDiagnostics(aged, 12, now, 60, finalAt(59)).cursorStalled, false);
+  assert.equal(cursorProgressDiagnostics(aged, 12, now, 60, finalAt(60)).cursorStalled, true);
+  assert.equal(cursorProgressDiagnostics(aged, 12, now, 60, finalAt(3_700)).cursorStalled, true, "the cursor moved after");
+  assert.equal(cursorProgressDiagnostics({ ...aged, lastSeenTxId: 9 }, 12, now, 60, finalAt(0)).cursorStalled, true,
+    "ids at or below the boundary have been final since the cursor moved");
+  assert.equal(cursorProgressDiagnostics({ lastSeenTxId: 10 }, 12, now, 60, finalAt(900)).cursorStalled, null);
   assert.equal(cursorProgressDiagnostics({ lastSeenTxId: 10 }, 12, now, 60).cursorStalled, null);
   assert.equal(cursorProgressDiagnostics(
     { lastSeenTxId: 10, cursorAdvancedAt: now },
@@ -252,17 +260,32 @@ test("status reads the same stored first sighting the indexer writes, so it neve
   assert.equal(stillAbsent.cursorStalled, false, "the cursor is at the depth-settled tip");
 });
 
-test("status reports a stall when the cursor is behind a tip seen for the limit", async (t) => {
+test("a tip that has only just become final is not a stall until the threshold has passed since", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
   const chain = [{ id: 1270 }, { id: 1269 }, { id: 1268 }];
-  const stalled = await statusWith(1268, chain, [], { id: 1270, since: STATUS_NOW - 300_000 });
+  const justFinal = await statusWith(1268, chain, [], { id: 1270, since: STATUS_NOW - 300_000 });
+  assert.equal(justFinal.settledTip, 1270);
+  assert.equal(justFinal.secondsSinceCursorAdvanced, 25_200, "the cursor itself last moved long ago");
+  assert.equal(justFinal.cursorStalled, false);
+  const threshold = justFinal.cursorStallThresholdSeconds as number;
+  const waiting = await statusWith(1268, chain, [], { id: 1270, since: STATUS_NOW - 300_000 - (threshold - 1) * 1_000 });
+  assert.equal(waiting.cursorStalled, false);
+});
+
+test("status reports a stall when the cursor is behind the settled tip past the threshold since it became final", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const chain = [{ id: 1270 }, { id: 1269 }, { id: 1268 }];
+  const threshold = (await statusWith(1268, chain)).cursorStallThresholdSeconds as number;
+  const stalled = await statusWith(1268, chain, [], { id: 1270, since: STATUS_NOW - 300_000 - threshold * 1_000 });
   assert.equal(stalled.settledTip, 1270);
-  assert.equal(stalled.secondsSinceCursorAdvanced, 25_200);
   assert.equal(stalled.cursorStalled, true);
 
   const deep = await statusWith(1000, chain);
   assert.equal(deep.settledTip, 1268);
   assert.equal(deep.cursorStalled, true);
+  const deepWithSighting = await statusWith(1000, chain, [], { id: 1270, since: STATUS_NOW - 300_000 });
+  assert.equal(deepWithSighting.settledTip, 1270);
+  assert.equal(deepWithSighting.cursorStalled, true, "ids at the depth boundary were final long before the tip");
 });
 
 test("a stored first sighting of another id, a future time or a corrupt record is treated as just seen", async (t) => {
@@ -304,18 +327,12 @@ test("large transaction rows do not hide the chain tip", async (t) => {
 
 test("status reports an unknown tip for a malformed node reply instead of failing", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
-  for (const chain of [[null], ["x"], [7], [{ id: "1270" }], []]) {
+  for (const chain of [[null], ["x"], [7], [{ id: "1270" }], [], [{ id: 2.5 }], [{ id: -5 }], [{ id: 1e300 }]]) {
     const body = await statusWith(1268, chain);
     assert.equal(body.chainLatestTx, null, JSON.stringify(chain));
     assert.equal(body.settledTip, null, JSON.stringify(chain));
     assert.equal(body.cursorStalled, null, JSON.stringify(chain));
   }
-});
-
-test("status never reports a negative settled tip", async (t) => {
-  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
-  const body = await statusWith(0, [{ id: -5 }]);
-  assert.equal(body.settledTip, 0);
 });
 
 test("status leaves the settled tip unknown when the node cannot be read", async (t) => {

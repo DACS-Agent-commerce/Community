@@ -31,7 +31,7 @@ import {
 import type { BundleBinding, RegisteredDeal } from "./types.js";
 import { contentHash } from "./canonical.js";
 import { deriveStorageAddress } from "./chain.js";
-import { finalityRule, observeTip, settledTip, type TipObservation } from "./scanFinality.js";
+import { finalityRule, isTipId, observeTip, settledTip, type TipObservation } from "./scanFinality.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const nonNegativeInt = (value: unknown, fallback: number): number => {
@@ -516,15 +516,16 @@ export async function scanChain(
     }
     const ids = page.map((t) => t.id).filter((i): i is number => typeof i === "number");
     if (cursor === "latest" && ids.length) {
-      chainTip = Math.max(...ids);
-      if (Number.isSafeInteger(chainTip) && chainTip >= 0) observedTip = chainTip;
-      let unchangedMs = 0;
-      if (observedTip !== null) {
-        const seen = observeTip(opts.tipObservation, observedTip, opts.now);
-        tipObservation = seen.observation;
-        unchangedMs = seen.unchangedMs;
+      const newest = Math.max(...ids);
+      if (!isTipId(newest)) {
+        scanError = `the newest transaction id ${String(newest)} is not a non-negative safe integer`;
+        break;
       }
-      settled = settledTip(page, chainTip, rule, unchangedMs);
+      chainTip = newest;
+      observedTip = newest;
+      const seen = observeTip(opts.tipObservation, newest, opts.now);
+      tipObservation = seen.observation;
+      settled = settledTip(page, newest, rule, seen.unchangedMs) ?? since;
     }
     // Only final txs beyond the cursor are new work.
     const fresh = page.filter((t) => typeof t.id !== "number" || (t.id > since && t.id <= settled));

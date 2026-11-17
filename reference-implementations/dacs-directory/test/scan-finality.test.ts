@@ -254,8 +254,7 @@ test("settledFromTip uses the tip only after the limit and never goes below zero
   assert.equal(settledFromTip(1270, rule, 299_999), 1268);
   assert.equal(settledFromTip(1270, rule, 300_000), 1270);
   assert.equal(settledFromTip(1, rule, 0), 0);
-  assert.equal(settledFromTip(-5, rule, 0), 0);
-  assert.equal(settledFromTip(-5, rule, 300_000), 0);
+  assert.equal(settledFromTip(0, rule, 300_000), 0);
 });
 
 test("settledTip needs every id from the depth boundary to the tip once the tip is final", () => {
@@ -280,10 +279,25 @@ test("the lowest ids settle by time: id 0 is the clamped boundary, not a require
   assert.equal(settledTip([{ id: 3 }, { id: 2 }], 3, rule, stable), 1, "the boundary id 1 is unreadable");
 });
 
-test("a negative newest id never gives a negative settled tip", () => {
-  assert.equal(settledTip([{ id: -5 }], -5, rule, 300_000), 0);
-  assert.equal(settledTip([], -5, rule, 0), 0);
-  assert.equal(settledTip([{ id: -5 }], -5, { ...rule, depth: 0 }, 300_000), 0);
+test("a newest id that is not a non-negative safe integer leaves the settled tip unknown", () => {
+  for (const tip of [-5, 2.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "7" as unknown as number]) {
+    assert.equal(settledTip([{ id: tip }], tip, rule, 300_000), null, String(tip));
+    assert.equal(settledTip([], tip, rule, 0), null, String(tip));
+    assert.equal(settledTip([{ id: tip }], tip, { ...rule, depth: 0 }, 300_000), null, String(tip));
+    assert.equal(settledFromTip(tip, rule, 0), null, String(tip));
+    assert.equal(settledFromTip(tip, rule, 300_000), null, String(tip));
+  }
+});
+
+test("the scanner indexes nothing and reports an error when the newest id is not a valid id", async () => {
+  for (const tip of [2.5, -5]) {
+    const result = await passAt(newMachine(), [transfer(tip)], 1, T0);
+    assert.equal(result.complete, false, String(tip));
+    assert.equal(result.observedTip, null, String(tip));
+    assert.equal(result.tipObservation, null, String(tip));
+    assert.equal(result.txsScanned, 0, String(tip));
+    assert.match(result.scanError ?? "", /not a non-negative safe integer/, String(tip));
+  }
 });
 
 test("a null or non-object row does not make the rule throw", () => {

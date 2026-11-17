@@ -95,14 +95,21 @@ export function tipUnchangedMs(stored: unknown, tip: number, now: number = Date.
   return prior !== null && prior.id === tip && prior.since <= now ? now - prior.since : 0;
 }
 
+/** Whether `value` can be the newest transaction id: a non-negative safe integer. */
+export function isTipId(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 /**
  * Highest id that is final, given only the newest id `tip` and how long it has
  * been observed unchanged. The tip itself is final once `tipUnchangedMs`
- * reaches the rule's seconds; otherwise only ids `depth` behind it are.
+ * reaches the rule's seconds; otherwise only ids `depth` behind it are. A `tip`
+ * that is not a valid id leaves the settled tip unknown (null).
  */
-export function settledFromTip(tip: number, rule: FinalityRule, tipUnchangedMs: number): number {
+export function settledFromTip(tip: number, rule: FinalityRule, tipUnchangedMs: number): number | null {
+  if (!isTipId(tip)) return null;
   const depthTip = Math.max(0, tip - rule.depth);
-  return tipUnchangedMs >= rule.seconds * 1_000 ? Math.max(0, tip) : depthTip;
+  return tipUnchangedMs >= rule.seconds * 1_000 ? tip : depthTip;
 }
 
 /**
@@ -113,16 +120,17 @@ export function settledFromTip(tip: number, rule: FinalityRule, tipUnchangedMs: 
  * Going past the depth boundary needs every id from the boundary up to the
  * final one to be present among `newest`, so an id missing from the rows read
  * stops the result just below it. When `depth` reaches the rows that can be read
- * the depth rule alone decides.
+ * the depth rule alone decides. A `tip` that is not a valid id gives null.
  */
 export function settledTip(
   newest: readonly FinalityTransaction[],
   tip: number,
   rule: FinalityRule,
   tipUnchangedMs: number,
-): number {
-  const depthTip = Math.max(0, tip - rule.depth);
+): number | null {
   const upper = settledFromTip(tip, rule, tipUnchangedMs);
+  if (upper === null) return null;
+  const depthTip = Math.max(0, tip - rule.depth);
   if (upper <= depthTip || tip - depthTip >= MAX_FINALITY_WINDOW) return depthTip;
   const ids = new Set<number>();
   for (const tx of newest) {
