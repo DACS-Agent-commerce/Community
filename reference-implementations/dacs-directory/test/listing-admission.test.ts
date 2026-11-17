@@ -199,6 +199,39 @@ test("one signed Listing stored under two anchors is indexed once, from the firs
   }
 });
 
+for (const failure of ["HTTP 404", "invalid Listing content"] as const) {
+  test(`a Listing is indexed once from the second anchor when the first returns ${failure}`, async () => {
+    const first = `stor-${"5".repeat(40)}`;
+    const second = `stor-${"6".repeat(40)}`;
+    const listingId = failure === "HTTP 404" ? "second-anchor-after-404" : "second-anchor-after-invalid";
+    const listing = signedListing(listingId, attested({ kind: "self-signed" }));
+    // The same Listing with a signature over other bytes: the scope, and so the content hash, is unchanged.
+    const invalid = { ...listing, signature: { ...(listing.signature as Obj), value: sign("not this Listing") } };
+    const requested: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const anchor = String(input).split("/").pop() ?? "";
+      requested.push(anchor);
+      if (anchor === first && failure === "HTTP 404") return new Response(null, { status: 404 });
+      if (anchor === first || anchor === second) {
+        return Response.json({ success: true, owner: `0x${keyHex}`, programName: "opaque", data: anchor === first ? invalid : listing });
+      }
+      return new Response(null, { status: 404 });
+    };
+    try {
+      const record = await indexRegistration(
+        { primaryClaim: seller, displayName: "Second Anchor Desk", listingAnchors: [first, second] },
+        undefined,
+        async () => ({}),
+      );
+      assert.deepEqual(requested, [first, second]);
+      assert.deepEqual(record.listings.map((summary) => [summary.listingId, summary.anchor.locator]), [[listingId, second]]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
 test("published summaries never claim transaction readiness the Directory did not assess", async () => {
   const summary = (listingId: string, transactionReadiness?: unknown): ListingSummary => ({
     listingId,
