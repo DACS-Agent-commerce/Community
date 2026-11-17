@@ -392,19 +392,21 @@ export async function verifiedDiscoveryAgreement(raw: Record<string, unknown>): 
   } catch { return false; }
 }
 
-async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps): Promise<ResolvedEvidence | null> {
-  if (kind === "attestation") {
-    if (!isCurrentRef(ref)) return null;
-    const hash = normalizedHash(ref.contentHash);
-    const raw = await deps.read(ref.anchor.locator);
-    if (!raw || !withinArtifactLimit(raw) || contentHash(raw) !== hash) return null;
-    return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
-  }
-  if (!isCurrentRef(ref)) return null;
+/** Why a reference could not be resolved; it is appended to the graph's failure reason so an operator can tell the cases apart. */
+type RefFailureCause = "bad-ref" | "read-failed" | "too-large" | "shape" | "hash-mismatch" | "signature";
+
+async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps): Promise<ResolvedEvidence | { cause: RefFailureCause }> {
+  if (!isCurrentRef(ref)) return { cause: "bad-ref" };
   const hash = normalizedHash(ref.contentHash);
   const raw = await deps.read(ref.anchor.locator);
-  if (!raw || !withinArtifactLimit(raw) || !shapeOk(raw, kind) || artifactHash(raw, kind) !== hash ||
-      !(await signatureOk(raw, kind, deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey))) return null;
+  if (!raw) return { cause: "read-failed" };
+  if (!withinArtifactLimit(raw)) return { cause: "too-large" };
+  if (kind === "attestation") {
+    return contentHash(raw) === hash ? { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash } : { cause: "hash-mismatch" };
+  }
+  if (!shapeOk(raw, kind)) return { cause: "shape" };
+  if (artifactHash(raw, kind) !== hash) return { cause: "hash-mismatch" };
+  if (!(await signatureOk(raw, kind, deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey))) return { cause: "signature" };
   return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
 }
 
@@ -469,7 +471,8 @@ async function verifyCurrentEvidenceGraph(
   let agreement: Record<string, unknown> | undefined;
   if (raw.agreementRef !== undefined) {
     if (reserveTopLevelRef("agreement", raw.agreementRef) !== "new") return { ...fail("duplicate or invalid top-level reference"), signaturesVerified };
-    const resolved = await resolveRef("agreement", raw.agreementRef, deps); if (!resolved) return { ...fail("agreement reference failed"), signaturesVerified };
+    const resolved = await resolveRef("agreement", raw.agreementRef, deps);
+    if ("cause" in resolved) return { ...fail(`agreement reference failed: ${resolved.cause}`), signaturesVerified };
     if (resolved.raw.jobId !== raw.jobId) return { ...fail("agreement belongs to another job"), signaturesVerified };
     artifacts.push(resolved); agreement = resolved.raw;
   } else if (!abort) return { ...fail("non-abort bundle has no agreement"), signaturesVerified };
@@ -479,7 +482,8 @@ async function verifyCurrentEvidenceGraph(
       const reserved = reserveTopLevelRef(kind, ref);
       if (reserved === "invalid") return { ...fail("duplicate or invalid top-level reference"), signaturesVerified };
       if (reserved === "duplicate-rating") continue;
-      const resolved = await resolveRef(kind, ref, deps); if (!resolved) return { ...fail(`${kind} reference failed`), signaturesVerified };
+      const resolved = await resolveRef(kind, ref, deps);
+      if ("cause" in resolved) return { ...fail(`${kind} reference failed: ${resolved.cause}`), signaturesVerified };
       if ((kind === "evidence" || kind === "rating" || kind === "composite") && resolved.raw.jobId !== raw.jobId) return { ...fail(`${kind} belongs to another job`), signaturesVerified };
       if (kind === "rating") {
         const target = parties.find((party) => sameSigningIdentity(party.primaryClaim, resolved.raw.target));
@@ -508,7 +512,7 @@ async function verifyCurrentEvidenceGraph(
     const hash = normalizedHash(value.contentHash);
     if (seen.has(key)) return seen.get(key) === hash;
     if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return false; }
-    const nested = await resolveRef(kind, value, deps); if (!nested) return false;
+    const nested = await resolveRef(kind, value, deps); if ("cause" in nested) return false;
     if ((kind === "evidence" || kind === "composite") && nested.raw.jobId !== raw.jobId) return false;
     if (kind === "evidence" && !parties.some((party) =>
       sameSigningIdentity(party.primaryClaim, rec(nested.raw.signature)?.signer))) return false;

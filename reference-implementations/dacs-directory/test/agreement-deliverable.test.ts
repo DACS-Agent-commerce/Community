@@ -10,7 +10,7 @@ import { deliverableRefFor } from "./fixtures/agreement-fields.js";
 // hash and schemaUrl must equal those derived from the listing's `offering.deliverable`. A missing or mistyped
 // value is a malformed agreement; a well-formed value that differs does not match its listing.
 const PROFILES = [["legacy", vector], ["payee-bound", payeeBoundVector]] as const;
-const MALFORMED_REFUSAL = "agreement reference failed";
+const MALFORMED_REFUSAL = "agreement reference failed: shape";
 const LISTING_MISMATCH_REFUSAL = "agreement artifact does not match the pinned listing pipeline";
 const ABSENT = Symbol("absent");
 const SCHEMA_URL = "https://example.test/schema/v1";

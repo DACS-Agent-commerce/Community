@@ -467,8 +467,8 @@ async function vetRecordGraph(jobId: string, offset: number, overallDecision: un
 }
 
 test("a composite overallDecision wrapped in an array is rejected by the shape check", async () => {
-  assert.notEqual(await vetRecordGraph("job-shape-overall", 360, "pass", "pass"), "composite reference failed");
-  assert.equal(await vetRecordGraph("job-shape-overall", 360, ["pass"], "pass"), "composite reference failed");
+  assert.notEqual(await vetRecordGraph("job-shape-overall", 360, "pass", "pass"), "composite reference failed: shape");
+  assert.equal(await vetRecordGraph("job-shape-overall", 360, ["pass"], "pass"), "composite reference failed: shape");
 });
 
 test("a verify-result decision wrapped in an array is rejected by the shape check", async () => {

@@ -11,7 +11,7 @@ import { type Obj, dids, locator, vector, payeeBoundVector, installAgreement, gr
 // shape-checked disclosure: a malformed schedule rejects the agreement, but reconciling its totals against
 // items, price or settlement never gates acceptance.
 const PROFILES = [["legacy", vector], ["payee-bound", payeeBoundVector]] as const;
-const AGREEMENT_REFERENCE_FAILURE = "agreement reference failed";
+const AGREEMENT_REFERENCE_FAILURE = "agreement reference failed: shape";
 const ABSENT = Symbol("absent");
 
 type Mutation = [name: string, apply: (scope: Obj) => void];
