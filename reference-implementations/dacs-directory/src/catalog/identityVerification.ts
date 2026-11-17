@@ -12,7 +12,6 @@ import type { IdentityTier } from "./types.js";
 
 type Obj = Record<string, unknown>;
 const obj = (value: unknown): Obj | null => value && typeof value === "object" && !Array.isArray(value) ? value as Obj : null;
-const normalizeHash = (value: unknown) => typeof value === "string" ? value.replace(/^sha256[:-]/i, "").toLowerCase() : "";
 const INSTITUTIONAL = new Set(["lei", "finra-crd", "sam-uei", "fedramp", "cmmc", "naics"]);
 
 export interface RecipePolicy {
@@ -48,7 +47,7 @@ async function verifiedClaim(
   const parts = claimParts(claim.ref); const ref = obj(claim.verifiedBy);
   if (!parts || !ref || !isCurrentRef(ref) || !Number.isSafeInteger(ref.recipeVersion)) return null;
   const raw = await read(ref.anchor.locator); if (!raw) return null;
-  if (artifactHash(raw, "verify-result") !== normalizeHash(ref.contentHash)) return null;
+  if (artifactHash(raw, "verify-result") !== ref.contentHash) return null;
   if (raw.resultVersion !== "1" || raw.scheme !== parts.scheme || raw.identifier !== parts.identifier ||
       raw.decision !== "pass" || raw.recipeVersion !== ref.recipeVersion || typeof raw.verifiedAt !== "number") return null;
   const signature = obj(raw.signature);
@@ -67,7 +66,7 @@ async function verifiedClaim(
   // set aggregate-signature semantics remain a deployment trust-policy concern.
   const attestation = obj(raw.attestation);
   if (!attestation || !isCurrentRef(attestation)) return null;
-  const attested = await read(attestation.anchor.locator); if (!attested || contentHash(attested) !== normalizeHash(attestation.contentHash)) return null;
+  const attested = await read(attestation.anchor.locator); if (!attested || contentHash(attested) !== attestation.contentHash) return null;
   return { scheme: parts.scheme };
 }
 
