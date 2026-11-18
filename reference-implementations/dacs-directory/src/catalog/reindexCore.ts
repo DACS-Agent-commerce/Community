@@ -291,7 +291,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     ])].sort();
     for (const observation of scan.observations) recordArtifact(observation);
     for (const failure of scan.failures) {
-      const stable = failure.code === "STORAGE_NOT_FOUND" || failure.code === "STORAGE_NOT_PUBLIC";
+      const stable = failure.code === "STORAGE_NOT_FOUND" || failure.code === "STORAGE_NOT_PUBLIC" ||
+        failure.code === "STORAGE_WITHDRAWAL_MARKER_ABSENT";
       recordArtifactFailure(failure.locator, failure.kind, failure.code, failure.message, stable ? 1 : 5);
     }
     // One bounded age-prune batch per pass keeps failure telemetry from growing

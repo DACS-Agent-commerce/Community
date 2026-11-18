@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
+import Database from "better-sqlite3";
 
 import { parseStatusDiagnosticsQuery } from "../src/catalog/statusDiagnostics.js";
 import { catalogStatusSchema } from "../src/catalog/contracts.js";
@@ -110,6 +111,109 @@ test("storage cause diagnostics are actionable without claiming DACS absence", (
   assert.doesNotMatch(JSON.stringify(privateDiagnostic), /raw 403 response/);
 });
 
+test("a missing carried withdrawal marker has a bounded public diagnostic", () => {
+  const target = locator("c");
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT",
+    "raw upstream detail ".repeat(1_000), 1);
+
+  const diagnostics = store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics;
+  assert.equal(diagnostics.byCode.STORAGE_WITHDRAWAL_MARKER_ABSENT, 1);
+  assert.equal(diagnostics.items[0].code, "STORAGE_WITHDRAWAL_MARKER_ABSENT");
+  assert.equal(diagnostics.items[0].classification, "unclassified-storage");
+  assert.equal(diagnostics.items[0].attempts, 1);
+  assert.equal(diagnostics.items[0].retryState, "exhausted");
+  assert.match(diagnostics.items[0].message, /read succeeded without the withdrawal marker/);
+  assert.match(diagnostics.items[0].message, /records that read, not the current withdrawal status/);
+  assert.doesNotMatch(diagnostics.items[0].message, /remains unresolved|Verification runs separately|read clears/);
+  assert.ok(diagnostics.items[0].message.length <= 200);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /raw upstream detail/);
+  assert.ok(!store.loadRetryableArtifacts(Date.now() + 60_000).includes(target));
+});
+
+test("a current marker read recovers only the marker-absent failure and resets its lifecycle", () => {
+  const target = locator("d");
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "old read", 1);
+  const historySize = store.failureHistorySize();
+  store.recoverMissingWithdrawalMarkerRead(target);
+  assert.equal(store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.returned, 0);
+  assert.ok(!store.loadRetryableArtifacts(Date.now() + 60_000).includes(target));
+  assert.equal(store.failureHistorySize(), historySize, "recovery preserves failure history");
+  assert.equal(store.observedRevocationCandidate(target), null, "diagnostic cleanup does not cache marker bytes");
+
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "new failure", 1);
+  const again = store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.items[0];
+  assert.equal(again.attempts, 1, "a later failure starts fresh");
+  assert.equal(again.classification, "dacs-artifact", "the current read established the marker's shape");
+
+  const unrelated = locator("e");
+  store.recordArtifactFailure(unrelated, "unknown", "STORAGE_RPC_UNAVAILABLE", "different failure", 1);
+  store.recoverMissingWithdrawalMarkerRead(unrelated);
+  assert.equal(store.indexerDiagnostics({ deadLetterLocator: unrelated }).deadLetterDiagnostics.items[0]?.code,
+    "STORAGE_RPC_UNAVAILABLE", "other failure classes keep their existing lifecycle");
+});
+
+test("marker-absent cleanup preserves the complete earlier observation and failure history", () => {
+  const target = locator("f");
+  const data = { listingId: "earlier", listingVersion: 1, listingContentHash: "a".repeat(64), revokedAt: 1 };
+  store.recordArtifact({ locator: target, kind: "listing-revocation", profile: "dacs-v0.1",
+    owner: `0x${"a".repeat(64)}`, contentHash: "b".repeat(64), data, observedAt: 123, anchorTime: 45 });
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "a later read", 1);
+  const db = new Database(join(dataDirectory, "directory.sqlite"));
+  try {
+    const observation = db.prepare("SELECT kind,profile,owner,content_hash,data_json,observed_at,anchor_time FROM artifacts WHERE locator=?");
+    const history = db.prepare("SELECT * FROM artifact_failure_history WHERE locator=?");
+    const before = observation.get(target);
+    const beforeHistory = history.get(target);
+    store.recoverMissingWithdrawalMarkerRead(target);
+    assert.deepEqual(observation.get(target), before);
+    assert.deepEqual(history.get(target), beforeHistory);
+    assert.deepEqual(store.observedRevocationCandidate(target), data);
+    assert.equal(store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.returned, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) count FROM dead_letters WHERE locator=?").get(target) as { count: number }).count, 0,
+      "recovery removes the stored exhausted-queue row, not only its public projection");
+    assert.deepEqual(db.prepare("SELECT status,error_code,error_message,retry_count,next_retry_at,rejection_count,deferred_at FROM artifacts WHERE locator=?").get(target), {
+      status: "observed", error_code: null, error_message: null, retry_count: 0,
+      next_retry_at: null, rejection_count: 0, deferred_at: null,
+    });
+    db.prepare("UPDATE artifacts SET kind='listing' WHERE locator=?").run(target);
+    store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "another read", 1);
+    const knownKind = observation.get(target);
+    store.recoverMissingWithdrawalMarkerRead(target);
+    assert.deepEqual(observation.get(target), knownKind, "a known earlier artifact kind is retained with its bytes");
+  } finally { db.close(); }
+});
+
+test("marker-absent cleanup is rolled back when its chain read window is discarded", () => {
+  const target = locator("9");
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "before the window", 1);
+  const before = store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.items;
+  store.openChainReadWindow();
+  try {
+    store.recoverMissingWithdrawalMarkerRead(target);
+    assert.equal(store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.returned, 0);
+  } finally { store.revertChainReadWindow(); }
+  assert.deepEqual(store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.items, before);
+});
+
+test("a current marker read exits a prior periodic content-rejection lifecycle", () => {
+  const target = locator("0");
+  store.recordArtifactFailure(target, "unknown", "ARTIFACT_REJECTED", "earlier rejected content", 1);
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "later marker-less read", 1);
+  const db = new Database(join(dataDirectory, "directory.sqlite"));
+  try {
+    db.prepare("UPDATE artifacts SET deferred_at=17 WHERE locator=?").run(target);
+    store.recoverMissingWithdrawalMarkerRead(target);
+    assert.deepEqual(db.prepare("SELECT status,retry_count,rejection_count,deferred_at,next_retry_at FROM artifacts WHERE locator=?").get(target), {
+      status: "observed", retry_count: 0, rejection_count: 0, deferred_at: null, next_retry_at: null,
+    });
+    assert.ok(!store.loadRetryableArtifacts(Date.now() + 3_600_000).includes(target));
+    store.recordArtifactFailure(target, "unknown", "STORAGE_RPC_UNAVAILABLE", "fresh transient failure", 5);
+    assert.deepEqual(db.prepare("SELECT status,retry_count,rejection_count,deferred_at FROM artifacts WHERE locator=?").get(target), {
+      status: "retry", retry_count: 1, rejection_count: 0, deferred_at: null,
+    });
+  } finally { db.close(); }
+});
+
 test("listing binding rejections are persistent, public-safe, filterable, and recoverable", () => {
   const target = locator("7");
   const claim = `did:demos:agent:${"7".repeat(64)}`;
@@ -200,7 +304,7 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
   assert.equal(invalid.status, 400);
 
   const target = locator("5");
-  store.recordArtifactFailure(target, "unknown", "STORAGE_UNREADABLE", "raw RPC secret", 1);
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "raw RPC secret", 1);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
     result: 200, response: [{ id: 123 }],
@@ -225,6 +329,7 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
     const indexer = body.indexer as ReturnType<typeof store.indexerDiagnostics>;
     assert.equal(indexer.deadLetterDiagnostics.returned, 1);
     assert.equal(indexer.deadLetterDiagnostics.items[0].locator, target);
+    assert.equal(indexer.deadLetterDiagnostics.items[0].code, "STORAGE_WITHDRAWAL_MARKER_ABSENT");
     assert.equal(indexer.deadLetterDiagnostics.items[0].classification, "unclassified-storage");
     assert.doesNotMatch(JSON.stringify(indexer.deadLetterDiagnostics), /raw RPC secret/);
   } finally {
