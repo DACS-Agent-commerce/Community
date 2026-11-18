@@ -80,7 +80,7 @@ test("the listing route distinguishes incomplete anchor reads from failed verifi
         name: "an indexed anchor with a qualified NOT_FOUND reply is unavailable",
         reply: () => Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 }),
         status: 503,
-        body: { error: unavailable, reason: "anchor not found" },
+        body: { error: "listing anchor unavailable: the node reports no storage program at the anchor", reason: "anchor not found" },
       },
       {
         name: "an unavailable read retains its specific reason",
