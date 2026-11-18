@@ -493,7 +493,7 @@ test("current evidence graph resolves VerifyResult authority attestations", asyn
   const tampered = await buildCurrentEvidenceGraph(locator(5), { read: async (at) => maps.get(at) ?? null,
     resolveListing: async () => ({ locator: locator(1), raw: listing }) });
   assert.equal(tampered.ok, false);
-  assert.equal(tampered.reason, "VerifyResult attestation reference failed");
+  assert.equal(tampered.reason, "VerifyResult attestation reference failed: hash-mismatch");
 });
 
 test("current evidence graph caps attacker-controlled transitive work", async () => {
