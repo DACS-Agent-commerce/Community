@@ -337,7 +337,7 @@ export interface ScanState {
   /** Historic values remain readable so migrations can trigger a full replay. */
   schemaVersion?: number;
   lastSeenTxId: number;
-  /** Tip observed by the last published scan; null (or legacy missing) means unknown. */
+  /** Tip observed by the last published scan; null means it observed none and never corroborates a reset. */
   lastChainTip?: number | null;
   /** Wall-clock time when lastSeenTxId most recently increased. */
   cursorAdvancedAt?: number;

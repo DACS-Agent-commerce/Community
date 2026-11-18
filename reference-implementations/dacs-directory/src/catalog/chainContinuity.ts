@@ -16,6 +16,10 @@ export function cursorAheadBy(state: Pick<ScanState, "lastSeenTxId">, chainTip: 
  * large regression is treated as a chain replacement and allowed to clear
  * the derived cache. The threshold is intentionally configurable for chains
  * with different reorganisation characteristics.
+ *
+ * A saved null means the last published scan observed no tip. It is not an
+ * observation, so it cannot corroborate a regression. A legacy state with no
+ * saved tip keeps its existing behaviour.
  */
 export function chainResetRequired(
   state: Pick<ScanState, "lastSeenTxId" | "lastChainTip">,
@@ -23,8 +27,9 @@ export function chainResetRequired(
   threshold = chainResetThreshold(),
 ): boolean {
   if (!Number.isSafeInteger(chainTip) || chainTip < 0) return false;
+  if (state.lastChainTip === null) return false;
   const cursorRegression = state.lastSeenTxId - chainTip;
-  const priorCursorRegression = state.lastChainTip == null
+  const priorCursorRegression = state.lastChainTip === undefined
     ? cursorRegression
     : state.lastSeenTxId - state.lastChainTip;
   return cursorRegression >= threshold && priorCursorRegression >= threshold;

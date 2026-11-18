@@ -175,16 +175,37 @@ test("failure after an empty scan keeps the previous known state but records an 
   assert.equal(store.indexerDiagnostics().lastRun?.chain_tip, null);
 });
 
-test("legacy missing and numeric saved tips remain readable; null keeps legacy reset semantics", () => {
+test("saved tips remain readable; null never corroborates a reset and legacy missing is unchanged", () => {
   for (const tip of [undefined, null, 0, 80]) {
     seed(77, tip);
     assert.equal(store.loadScanState().lastChainTip, tip);
     assert.equal(savedTip(), tip);
   }
-  for (const tip of [400, 9990]) {
-    assert.equal(chainResetRequired({ lastSeenTxId: 10000, lastChainTip: null }, tip),
-      chainResetRequired({ lastSeenTxId: 10000 }, tip));
-  }
+  for (const tip of [0, 400, 9990]) assert.equal(chainResetRequired({ lastSeenTxId: 10000, lastChainTip: null }, tip), false);
+  assert.equal(chainResetRequired({ lastSeenTxId: 10000 }, 400), true, "legacy missing keeps its single-read behaviour");
+  assert.equal(chainResetRequired({ lastSeenTxId: 10000 }, 9990), false);
   assert.equal(chainResetRequired({ lastSeenTxId: 10000, lastChainTip: 0 }, 400), true);
   assert.equal(chainResetRequired({ lastSeenTxId: 10000, lastChainTip: 10002 }, 400), false);
+});
+
+test("a pass that observed no tip cannot corroborate a reset; a later observed low tip still can", async (t) => {
+  seed(10_000, 10_002);
+  const logs: string[] = [];
+  const run = (page: unknown[]) => {
+    const mock = t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+      const start = JSON.parse(String(init?.body)).params?.[0]?.data?.start;
+      return reply(start === undefined || start === "latest" ? page : []);
+    });
+    return reindexAll({ ...options, log: (line) => { logs.push(line); } }).finally(() => mock.mock.restore());
+  };
+  const resets = () => logs.filter((line) => line.startsWith("chain replacement detected")).length;
+  await run([]);
+  assert.equal(savedTip(), null);
+  await run([{ id: 400 }]);
+  assert.equal(resets(), 0, "one low read after an unobserved tip waits for corroboration");
+  assert.equal(store.loadScanState().lastSeenTxId, 10_000);
+  assert.equal(savedTip(), 400, "the pass saves the low tip it observed");
+  await run([{ id: 400 }]);
+  assert.equal(resets(), 1, "a second low observation still clears the cache");
+  assert.equal(store.loadScanState().lastSeenTxId, 0);
 });
