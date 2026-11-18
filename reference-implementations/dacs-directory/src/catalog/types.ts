@@ -337,7 +337,8 @@ export interface ScanState {
   /** Historic values remain readable so migrations can trigger a full replay. */
   schemaVersion?: number;
   lastSeenTxId: number;
-  lastChainTip?: number;
+  /** Tip observed by the last published scan; null (or legacy missing) means unknown. */
+  lastChainTip?: number | null;
   /** Wall-clock time when lastSeenTxId most recently increased. */
   cursorAdvancedAt?: number;
   /** Descending transaction cursor for the bounded SR-2 consensus-time backfill. */

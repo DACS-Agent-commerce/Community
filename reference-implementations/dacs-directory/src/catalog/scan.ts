@@ -58,7 +58,8 @@ export interface ScannedArtifacts {
   highestTxId: number;
   /** True only when the walk reached sinceTxId/genesis rather than maxTxs/error. */
   complete: boolean;
-  chainTip: number;
+  /** Diagnostic tip; never inferred from the scan cursor. */
+  chainTip: number | null;
   /** Null unless the scan actually observed a valid tip. */
   observedTip: number | null;
   observations: Array<{ locator: string; kind: string; profile: string; owner?: string; contentHash?: string; observedAt: number; anchorTime?: number; data?: Record<string, unknown>; rejected?: boolean }>;
@@ -485,7 +486,8 @@ export async function scanChain(
   let scanned = 0;
   let highestTxId = since;
   let complete = false;
-  let chainTip = since;
+  // Numeric working bound preserves finality/cursor behavior when no tip is observed.
+  let finalityTip = since;
   let observedTip: number | null = null;
   let scanError: string | undefined;
   const finalityDepth = nonNegativeInt(process.env.DACS_SCAN_FINALITY_DEPTH, 2);
@@ -506,10 +508,10 @@ export async function scanChain(
     }
     const ids = page.map((t) => t.id).filter((i): i is number => typeof i === "number");
     if (cursor === "latest" && ids.length) {
-      chainTip = Math.max(...ids);
-      if (Number.isSafeInteger(chainTip) && chainTip >= 0) observedTip = chainTip;
+      finalityTip = Math.max(...ids);
+      if (Number.isSafeInteger(finalityTip) && finalityTip >= 0) observedTip = finalityTip;
     }
-    const finalizedTip = Math.max(0, chainTip - finalityDepth);
+    const finalizedTip = Math.max(0, finalityTip - finalityDepth);
     // Only txs beyond the cursor are new work.
     const fresh = page.filter((t) => typeof t.id !== "number" || (t.id > since && t.id <= finalizedTip));
     const freshIds = fresh.map((t) => t.id).filter((id): id is number => typeof id === "number");
@@ -693,5 +695,5 @@ export async function scanChain(
   return { listings, deals, programs,
     revocations: new Map([...revocations].map(([hash, candidates]) => [hash, [...candidates].reverse()])),
     unreadRevocationMarkers, bundleBindings, bundleBindingOverflow, omittedBindings,
-    txsScanned: scanned, highestTxId, complete, chainTip, observedTip, observations, failures, scanError };
+    txsScanned: scanned, highestTxId, complete, chainTip: observedTip, observedTip, observations, failures, scanError };
 }
