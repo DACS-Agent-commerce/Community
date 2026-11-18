@@ -41,7 +41,8 @@ async function graphFor(route: Route, failure: Failure) {
   const reference = failure === "bad-ref" ? {} : ref(target, child, route.kind);
   if (failure === "too-large") child = { ...child, padding: "x".repeat(65_536) };
   if (failure === "shape") {
-    const version = { agreement: "agreementVersion", evidence: "evidenceVersion", composite: "recordVersion", rating: "ratingVersion" };
+    const version = { agreement: "agreementVersion", evidence: "evidenceVersion", composite: "recordVersion", rating: "ratingVersion",
+      "verify-result": "resultVersion" };
     child = { ...child, [version[route.kind as keyof typeof version]]: null };
   }
   if (failure === "hash-mismatch") child = { ...child, changed: true };
@@ -121,11 +122,33 @@ for (const route of direct) for (const failure of ["read-null", "read-throw", "t
   });
 }
 
-for (const route of nested) for (const failure of ["read-null", "hash-mismatch", "too-large"] as const) {
+for (const route of nested) for (const failure of ["read-null", "read-throw", "hash-mismatch", "too-large"] as const) {
   test(`diagnostic: nested ${route.name} reports ${failure}`, async () => {
     const graph = await graphFor(route, failure);
     assertRefused(graph);
-    assert.equal(graph.reason, `${route.reason}: ${failure === "read-null" ? "read-failed" : failure}`);
+    assert.equal(graph.reason, `${route.reason}: ${failure.startsWith("read-") ? "read-failed" : failure}`);
+    assert.equal(graph.errorCause, undefined, "raw read errors are not exposed");
+  });
+}
+
+// Attestations have no shape or signature check, so only signed nested kinds carry these causes.
+for (const route of nested.filter((candidate) => candidate.kind !== "attestation")) {
+  for (const failure of ["shape", "signature"] as const) {
+    test(`diagnostic: nested ${route.name} reports ${failure}`, async () => {
+      const graph = await graphFor(route, failure);
+      assertRefused(graph);
+      assert.equal(graph.reason, `${route.reason}: ${failure}`);
+    });
+  }
+}
+
+// A malformed attestation reference is refused earlier by its parent's shape check, so bad-ref is
+// observable only on routes whose parent shape accepts any value there.
+for (const route of nested.filter((candidate) => candidate.kind !== "attestation" && candidate !== nested[4])) {
+  test(`diagnostic: nested ${route.name} reports bad-ref`, async () => {
+    const graph = await graphFor(route, "bad-ref");
+    assertRefused(graph);
+    assert.equal(graph.reason, `${route.reason}: bad-ref`);
   });
 }
 
