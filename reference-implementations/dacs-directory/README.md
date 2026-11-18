@@ -191,6 +191,7 @@ Changing either the revision or patch requires rebuilding and updating `SDK_DIST
 | `DACS_DIRECTORY_DATA` | No | Writable directory for the SQLite repository and legacy JSON migration inputs |
 | `DACS_SCAN_MAX_TXS` | No | Maximum transactions scanned per pass; defaults to `100000` and fails closed if insufficient |
 | `DACS_SCAN_FINALITY_DEPTH` | No | Newest transaction count held back before indexing; defaults to `2` |
+| `DACS_SCAN_FINALITY_SECONDS` | No | Seconds the Directory must have seen the same newest transaction id, measured by its own clock, before that transaction and those below it are indexed even though they are not yet `DACS_SCAN_FINALITY_DEPTH` deep, so the last transactions of a quiet chain do not wait for new traffic. The first sighting of the newest id is saved with the scan state, so the count continues across indexing passes and restarts; a new newest id restarts it, a saved time that is unreadable or in the future counts as just seen, and a transaction's own timestamp is not used. An id missing from the newest transactions read from the node is not indexed early. A positive integer, defaults to `300` |
 | `DACS_SCAN_REPLAY_DEPTH` | No | Overlap of already-scanned transactions (behind the held-back depth) replayed on every pass; defaults to `2` |
 | `DACS_INDEX_INTERVAL_SECONDS` | No | Seconds between production reindex passes; defaults to `900` |
 | `DACS_CURSOR_STALL_SECONDS` | No | Cursor-stall alert threshold; defaults to twice the valid index interval (minimum `300`, default `1800`, maximum `86400`) |

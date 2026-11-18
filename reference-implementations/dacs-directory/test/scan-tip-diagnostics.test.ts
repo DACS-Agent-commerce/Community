@@ -209,3 +209,65 @@ test("a pass that observed no tip cannot corroborate a reset; a later observed l
   assert.equal(resets(), 1, "a second low observation still clears the cache");
   assert.equal(store.loadScanState().lastSeenTxId, 0);
 });
+
+test("an unknown diagnostic tip preserves the quiet-chain first sighting and settled-tip stall grace", async (t) => {
+  const firstSeen = 1_800_000_000_000;
+  let now = firstSeen;
+  let page: unknown[] = five;
+  seed(3, 5);
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(globalThis, "fetch", async () => reply(page));
+  await reindexAll(options);
+  const observation = { id: 5, since: firstSeen };
+  assert.deepEqual(store.loadScanState().tipObservation, observation);
+  assert.equal(store.loadScanState().lastSeenTxId, 3, "a new sighting still waits for depth");
+
+  now += 100_000;
+  page = [];
+  await reindexAll(options);
+  assert.equal(savedTip(), null, "the empty scan publishes unknown diagnostics");
+  assert.deepEqual(store.loadScanState().tipObservation, observation, "no observation does not fabricate or replace a sighting");
+  assert.equal(store.indexerDiagnostics().lastRun?.chain_tip, null);
+
+  page = five;
+  now = firstSeen + 300_000;
+  const justSettled = await statusBody();
+  assert.equal(justSettled.chainLatestTx, 5);
+  assert.equal(justSettled.settledTip, 5);
+  assert.equal(justSettled.cursorStalled, false, "stall grace starts when the tip settles, despite null scan diagnostics");
+  now += justSettled.cursorStallThresholdSeconds * 1_000;
+  assert.equal((await statusBody()).cursorStalled, true, "the settled cursor eventually stalls");
+
+  await reindexAll(options);
+  assert.equal(store.loadScanState().lastSeenTxId, 5, "the quiet-chain tip indexes without new traffic");
+  assert.deepEqual(store.loadScanState().tipObservation, observation);
+  assert.equal(savedTip(), 5);
+  assert.equal(store.indexerDiagnostics().lastRun?.chain_tip, 5);
+  assert.equal((await statusBody()).cursorStalled, false);
+});
+
+test("a failed publication records its new observed tip but rolls back the quiet-chain sighting", async (t) => {
+  const firstSeen = 1_800_000_000_000;
+  let now = firstSeen;
+  let page: unknown[] = five;
+  seed(0);
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(globalThis, "fetch", async () => reply(page));
+  await reindexAll(options);
+  const prior = store.loadScanState();
+  assert.deepEqual(prior.tipObservation, { id: 5, since: firstSeen });
+
+  now += 300_000;
+  page = [{ id: 6 }, ...five];
+  await assert.rejects(reindexAll({ ...options, log: (line) => {
+    if (line.startsWith("chain scan:")) throw new Error("synthetic publication failure after new sighting");
+  } }), /synthetic publication failure after new sighting/);
+  assert.deepEqual(store.loadScanState(), prior, "the failed run does not publish its provisional cursor, tip or sighting");
+  assert.equal(store.indexerDiagnostics().lastRun?.chain_tip, 6);
+  assert.equal(store.indexerDiagnostics().lastRun?.status, "failed");
+
+  now += 300_000;
+  await reindexAll(options);
+  assert.deepEqual(store.loadScanState().tipObservation, { id: 6, since: now }, "the next successful pass starts the new tip's timer");
+  assert.equal(store.loadScanState().lastSeenTxId, 4, "the failed sighting cannot make the new tip settle early");
+});

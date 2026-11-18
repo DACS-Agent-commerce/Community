@@ -339,6 +339,8 @@ export interface ScanState {
   lastSeenTxId: number;
   /** Tip observed by the last published scan; null means it observed none and never corroborates a reset. */
   lastChainTip?: number | null;
+  /** Newest transaction id and the local time (ms) the indexer first saw it as the newest. */
+  tipObservation?: { id: number; since: number };
   /** Wall-clock time when lastSeenTxId most recently increased. */
   cursorAdvancedAt?: number;
   /** Descending transaction cursor for the bounded SR-2 consensus-time backfill. */
