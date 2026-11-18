@@ -216,7 +216,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       if (!verified.includes(locator)) verified.push(locator);
       state.verifiedRevocations[listing.contentHash] = verified;
     }
-    scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(),
+    scan = await scanChain(null, { maxTxs, sinceTxId, retryLocators: loadRetryableArtifacts(), tipObservation: state.tipObservation,
       knownPrograms: new Map(Object.entries(state.programs)) });
     if (!scan.complete) {
       throw new Error(
@@ -351,6 +351,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     else state.cursorAdvancedAt ??= Date.now();
     state.lastSeenTxId = nextCursor;
     state.lastChainTip = scan.chainTip;
+    if (scan.tipObservation) state.tipObservation = scan.tipObservation;
     finishWithdrawalCarriageReplay();
     log(
       `chain scan: ${scan.txsScanned} new txs (cursor → ${state.lastSeenTxId}) — ` +

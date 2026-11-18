@@ -31,6 +31,7 @@ import {
 import type { BundleBinding, RegisteredDeal } from "./types.js";
 import { contentHash } from "./canonical.js";
 import { deriveStorageAddress } from "./chain.js";
+import { finalityRule, isTipId, observeTip, settledTip, type TipObservation } from "./scanFinality.js";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 const nonNegativeInt = (value: unknown, fallback: number): number => {
@@ -61,6 +62,8 @@ export interface ScannedArtifacts {
   chainTip: number;
   /** Null unless the scan actually observed a valid tip. */
   observedTip: number | null;
+  /** First sighting of the newest id to store with the scan state; null when no valid tip was read. */
+  tipObservation: TipObservation | null;
   observations: Array<{ locator: string; kind: string; profile: string; owner?: string; contentHash?: string; observedAt: number; anchorTime?: number; data?: Record<string, unknown>; rejected?: boolean }>;
   failures: Array<{ locator: string; kind: string; code: string; message: string }>;
   scanError?: string;
@@ -463,7 +466,8 @@ export async function readChainTip(): Promise<number> {
 /**
  * Scan recent transactions for DACS artifacts: page the node's tx history
  * (descending ids), deep-walk each tx for storage addresses, then read +
- * classify each unique address by its program name.
+ * classify each unique address by its program name. Only final transactions
+ * are taken (see `settledTip`); the newest ones wait until they are deep enough or the newest id has been observed unchanged long enough.
  */
 export async function scanChain(
   _demos: unknown,
@@ -472,6 +476,10 @@ export async function scanChain(
     sinceTxId?: number;
     retryLocators?: string[];
     knownPrograms?: ReadonlyMap<string, string | null>;
+    /** The stored first sighting of the newest transaction id (`ScanState.tipObservation`). */
+    tipObservation?: unknown;
+    /** Local time in milliseconds at which the newest transaction id is observed; defaults to the clock. */
+    now?: number;
   } = {},
 ): Promise<ScannedArtifacts> {
   // Incremental: walk latest → sinceTxId (exclusive) and stop. First run
@@ -488,14 +496,16 @@ export async function scanChain(
   let chainTip = since;
   let observedTip: number | null = null;
   let scanError: string | undefined;
-  const finalityDepth = nonNegativeInt(process.env.DACS_SCAN_FINALITY_DEPTH, 2);
+  const rule = finalityRule();
+  let tipObservation: TipObservation | null = null;
+  let settled = Math.max(0, chainTip - rule.depth);
 
   let cursor: number | "latest" = "latest";
   const PAGE = 100;
   while (scanned < maxTxs) {
     let page: Array<{ id?: number }> = [];
     try {
-      page = ((await nodeCall("getTransactions", { start: cursor, limit: PAGE })) ?? []) as Array<{ id?: number }>;
+      page = ((await nodeCall("getTransactions", { start: cursor, limit: PAGE })) ?? []) as typeof page;
     } catch (error) {
       scanError = error instanceof Error ? error.message : String(error);
       break;
@@ -506,12 +516,19 @@ export async function scanChain(
     }
     const ids = page.map((t) => t.id).filter((i): i is number => typeof i === "number");
     if (cursor === "latest" && ids.length) {
-      chainTip = Math.max(...ids);
-      if (Number.isSafeInteger(chainTip) && chainTip >= 0) observedTip = chainTip;
+      const newest = Math.max(...ids);
+      if (!isTipId(newest)) {
+        scanError = `the newest transaction id ${String(newest)} is not a non-negative safe integer`;
+        break;
+      }
+      chainTip = newest;
+      observedTip = newest;
+      const seen = observeTip(opts.tipObservation, newest, opts.now);
+      tipObservation = seen.observation;
+      settled = settledTip(page, newest, rule, seen.unchangedMs) ?? since;
     }
-    const finalizedTip = Math.max(0, chainTip - finalityDepth);
-    // Only txs beyond the cursor are new work.
-    const fresh = page.filter((t) => typeof t.id !== "number" || (t.id > since && t.id <= finalizedTip));
+    // Only final txs beyond the cursor are new work.
+    const fresh = page.filter((t) => typeof t.id !== "number" || (t.id > since && t.id <= settled));
     const freshIds = fresh.map((t) => t.id).filter((id): id is number => typeof id === "number");
     highestTxId = Math.max(highestTxId, ...(freshIds.length ? freshIds : [highestTxId]));
     scanned += fresh.length;
@@ -693,5 +710,5 @@ export async function scanChain(
   return { listings, deals, programs,
     revocations: new Map([...revocations].map(([hash, candidates]) => [hash, [...candidates].reverse()])),
     unreadRevocationMarkers, bundleBindings, bundleBindingOverflow, omittedBindings,
-    txsScanned: scanned, highestTxId, complete, chainTip, observedTip, observations, failures, scanError };
+    txsScanned: scanned, highestTxId, complete, chainTip, observedTip, tipObservation, observations, failures, scanError };
 }
