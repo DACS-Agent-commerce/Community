@@ -45,7 +45,7 @@ export async function GET(
       ],
     });
   }
-  const read = await readAnchorResult(hit.anchor.locator);
+  const read = await readAnchorResult(hit.anchor.locator, req.signal);
   if (read.status === "unavailable" || read.status === "absent") {
     const reason = read.status === "unavailable" ? read.reason : "anchor not found";
     const error = read.status === "absent"
