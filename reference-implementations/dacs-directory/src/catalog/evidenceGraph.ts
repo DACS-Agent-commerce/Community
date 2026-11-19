@@ -100,8 +100,8 @@ const ATTESTATION_ANCHOR_KINDS = new Set(["storage-program", "ipfs", "https"]);
 /** True only for a bare lowercase 64-digit hex string, the one spelling the pinned SDK accepts for a content hash. */
 export const wireSha256Ok = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 
-/** A party bundle hash is a wire sha256, or the same hash behind a lowercase `sha256:` prefix, as the pinned SDK accepts. */
-const wireBundleHashOk = (value: unknown): boolean =>
+/** An agreement party's bundle hash is a wire sha256 or the same hash behind a lowercase `sha256:` prefix. A DACS-5 bundle party takes only the bare form. */
+const agreementPartyHashOk = (value: unknown): boolean =>
   wireSha256Ok(value) || (typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value));
 
 /** DACS-2 AttestationRef: an anchor, a sha256 content hash in wire spelling and an optional signer. */
@@ -118,7 +118,7 @@ function attestationRefShapeOk(value: unknown): boolean {
  */
 function agreementPartyShapeOk(value: unknown): boolean {
   const party = rec(value);
-  return Boolean(party && wireBundleHashOk(party.bundleHash) && attestationRefShapeOk(party.vetRecordRef));
+  return Boolean(party && agreementPartyHashOk(party.bundleHash) && attestationRefShapeOk(party.vetRecordRef));
 }
 
 const AGREEMENT_PARTY_ROLES = new Set(["buyer", "seller", "bidder-non-winning"]);
@@ -394,7 +394,10 @@ export async function verifiedDiscoveryAgreement(raw: Record<string, unknown>): 
   } catch { return false; }
 }
 
-/** Why a reference could not be resolved; it is appended to the graph's failure reason so an operator can tell the cases apart. */
+/**
+ * Why a reference could not be resolved; it is appended to the graph's failure reason. `too-large` means the reader
+ * returned an artifact over the graph's size limit; an artifact the reader itself refuses as too large reads as `read-failed`.
+ */
 type RefFailureCause = "bad-ref" | "read-failed" | "too-large" | "shape" | "hash-mismatch" | "signature";
 
 async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps): Promise<ResolvedEvidence | { cause: RefFailureCause }> {
@@ -436,7 +439,7 @@ async function verifyCurrentEvidenceGraph(
   const signatures = arr(raw.signatures); const parties = arr(raw.parties);
   if (new Set(parties.map((party) => party.role)).size !== parties.length ||
       !parties.some((party) => party.role === "buyer") || !parties.some((party) => party.role === "seller") ||
-      parties.some((party) => !inSet(party.role, BUNDLE_ROLES) || typeof party.primaryClaim !== "string" || !wireBundleHashOk(party.bundleHash))) return fail("invalid or duplicate bundle parties");
+      parties.some((party) => !inSet(party.role, BUNDLE_ROLES) || typeof party.primaryClaim !== "string" || !wireSha256Ok(party.bundleHash))) return fail("invalid or duplicate bundle parties");
   if (!faultAttributionOk(raw, parties)) return fail("invalid fault attribution");
   if (!Array.isArray(raw.signatures) || signatures.length !== raw.signatures.length) {
     return fail("bundle signatures contain malformed entries");

@@ -39,14 +39,7 @@ test("a bundle with bare lowercase hashes is accepted", async () => {
   assert.equal(graph.ok, true, graph.reason);
 });
 
-test("a party bundleHash in the lowercase sha256: spelling is accepted", async () => {
-  const fixture = await vector();
-  const graph = await installBundle(fixture, (scope) => { parties(scope)[0].bundleHash = `sha256:${PARTY_HASH}`; });
-  assert.equal(graph.ok, true, graph.reason);
-});
-
-// The lowercase sha256: prefix is the one historical party spelling the SDK still accepts (tested above).
-for (const [name, spell] of respellings.filter(([name]) => name !== "sha256: prefix")) {
+for (const [name, spell] of respellings) {
   test(`a bundle party bundleHash with ${name} is rejected`, async () => {
     const fixture = await vector();
     const graph = await installBundle(fixture, (scope) => { parties(scope)[0].bundleHash = spell(PARTY_HASH); });
