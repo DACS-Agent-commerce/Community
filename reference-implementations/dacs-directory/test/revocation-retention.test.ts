@@ -118,3 +118,44 @@ test("an aged pending owner marker survives publication when it withholds a newl
   assert.equal(rows(hash).length, 1, "publication must not prune the pending marker of a live withheld Listing");
   assert.equal(store.hasPendingRevocationCandidates(hash), true);
 });
+
+
+test("reindex preserves failed seller pending markers while pruning successful seller stale candidates", async (t) => {
+  let now = 1_840_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  const { PINNED_DEMOS_CHAIN_IDENTITY } = await import("../src/catalog/nodeDeployment.js");
+  const { onPinnedChain } = await import("./fixtures/pinned-node.js");
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const failedHash = "6".repeat(64), staleHash = "7".repeat(64), unknownHash = "8".repeat(64);
+  const failed = catalog(failedHash, "9".repeat(64)).sellers[0];
+  const successful = catalog(staleHash, "a".repeat(64)).sellers[0];
+  successful.primaryClaim = `did:demos:agent:${"b".repeat(64)}`;
+  successful.heldListingVersions = [];
+  // Simulate a corrupt per-seller cached field: indexRegistration throws while
+  // preserving an unread anchor. The reindex caller must isolate this failure.
+  failed.heldListingVersions = {} as typeof failed.heldListingVersions;
+  store.publishCatalogChain({ catalogVersion: "1", generatedAt: now, sellers: [failed, successful] },
+    { ...store.loadScanState(), listings: {}, deals: {}, programs: {}, revocations: {}, verifiedRevocations: {} },
+    PINNED_DEMOS_CHAIN_IDENTITY);
+  store.saveRegistrations([
+    { primaryClaim: failed.primaryClaim, displayName: "failed", listingAnchors: [failed.listings[0].anchor.locator] },
+    { primaryClaim: successful.primaryClaim, displayName: "successful", listingAnchors: [] },
+  ]);
+  for (const [hash, n] of [[failedHash, 41], [staleHash, 42], [unknownHash, 43]] as const) {
+    store.admitRevocationCandidates(hash, [{ locator: locator(n), contentHash: "unchanged" }]);
+  }
+  now += week;
+  t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+    if (init?.body) return Response.json({ result: 200, response: [] });
+    return new Response("unavailable", { status: 503 });
+  });
+  const logs: string[] = [];
+  const summary = await reindexAll({ log: (line) => logs.push(line), nodeDeployment: onPinnedChain,
+    resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [], errors: [] }) });
+  assert.equal(summary.sellers, 1);
+  assert.ok(logs.some((line) => line.includes("seller indexing failed")), "the production caller caught the indexing exception");
+  assert.deepEqual(store.loadStoredCatalog().sellers.map((seller) => seller.primaryClaim), [successful.primaryClaim]);
+  assert.equal(rows(failedHash).length, 1, "an omitted seller's pending evidence survives");
+  assert.deepEqual(rows(staleHash), [], "a successfully indexed seller's removed Listing is pruned");
+  assert.equal(rows(unknownHash).length, 1, "partial indexing cannot attribute an unknown hash safely");
+});

@@ -1021,10 +1021,11 @@ export const resetCatalogChain = db.transaction((evidenceChain: string, replacem
 });
 const REVOCATION_CANDIDATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const pruneCandidates = db.prepare(`DELETE FROM revocation_candidates WHERE value_seen_at <= ?
-  AND (state = 'rejected' OR listing_hash NOT IN (SELECT value FROM json_each(?)))`);
+  AND (state = 'rejected' OR listing_hash NOT IN (SELECT value FROM json_each(?)))
+  AND (? IS NULL OR listing_hash IN (SELECT value FROM json_each(?)))`);
 /** Publish a completed pass's catalog, scanner/schema and readiness atomically; throws on failed storage. */
 export const publishCatalogChain = db.transaction((catalog: Catalog, state: ScanState, evidenceChain: string,
-  discoveryComplete = false): void => {
+  discoveryComplete = false, successfullyIndexedHashes?: readonly string[]): void => {
   if (discoveryComplete) {
     // Unchanged re-observations do not extend retention. Rejected or unmatched
     // values age out after a week; changed values start a new window. Pending
@@ -1035,7 +1036,10 @@ export const publishCatalogChain = db.transaction((catalog: Catalog, state: Scan
       ...seller.listings.filter((listing) => listing.status !== "revoked").map((listing) => listing.contentHash),
       ...(seller.heldListingVersions ?? []).map((listing) => listing.contentHash),
     ]);
-    pruneCandidates.run(Date.now() - REVOCATION_CANDIDATE_RETENTION_MS, JSON.stringify([...new Set(retained)]));
+    // During partial seller indexing, only hashes independently associated with
+    // successful sellers can be removed. Unknown and failed-seller hashes stay.
+    const eligible = successfullyIndexedHashes === undefined ? null : JSON.stringify([...new Set(successfullyIndexedHashes)]);
+    pruneCandidates.run(Date.now() - REVOCATION_CANDIDATE_RETENTION_MS, JSON.stringify([...new Set(retained)]), eligible, eligible);
   }
   saveScanState({ ...state, schemaVersion: SCAN_STATE_SCHEMA_VERSION });
   saveCatalog(catalog);

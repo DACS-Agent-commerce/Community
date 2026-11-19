@@ -457,6 +457,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const allRegs = [...regs, ...discovered.values()];
 
     const sellers = [];
+    const successfullyIndexedHashes: string[] = [];
     for (const reg of allRegs) {
       const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
       log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
@@ -479,6 +480,12 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           `verified=${record.deals.filter((d) => d.refsVerified).length} completed=${record.reputation.completed}`,
       );
       sellers.push(record);
+      // Prior catalog records establish which stale hashes belong to this
+      // successfully indexed seller, even when its Listing disappeared now.
+      successfullyIndexedHashes.push(...[before, record].flatMap((seller) => seller ? [
+        ...seller.listings.map((listing) => listing.contentHash),
+        ...(seller.heldListingVersions ?? []).map((listing) => listing.contentHash),
+      ] : []));
     }
 
     const generatedAt = Date.now();
@@ -518,7 +525,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
             (prior.scanProgress?.cursor ?? -1) > state.lastSeenTxId
             ? state.cursorAdvancedAt ?? null
             : prior.scanProgress?.cursorAdvancedAt ?? null,
-          lastSuccessfulFullScanAt: completedAt, fromTx: sinceTxId } }, state, served.chainIdentity, !crawlIncomplete);
+          lastSuccessfulFullScanAt: completedAt, fromTx: sinceTxId } }, state, served.chainIdentity, !crawlIncomplete,
+        omitted.omittedSellers > 0 ? successfullyIndexedHashes : undefined);
       finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: completedScan.chainTip, txs: completedScan.txsScanned,
         artifacts: completedScan.observations.length, rejected: completedScan.failures.length });
     });
