@@ -392,6 +392,7 @@ export const openApiDocument = (origin: string) => ({
           "200": { description: "Signed listing artifact" },
           "400": { description: `seller over ${MAX_CLAIM_QUERY_BYTES} bytes` },
           "404": { description: "Listing not found" },
+          "409": { description: "Ambiguous archived listing version: more than one distinct signed Listing matches the requested id and version. Pass seller to disambiguate seller-scoped IDs; ambiguity within one seller still returns 409." },
           "502": { description: "Anchor verification failed" },
           "503": { description: "The Demos node could not be read; no cached copy is served" },
         },
