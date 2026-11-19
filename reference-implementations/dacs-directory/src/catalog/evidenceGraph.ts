@@ -96,8 +96,12 @@ const nonNegativeNumberOk = (value: unknown): boolean => typeof value === "numbe
 const optional = (value: unknown, valid: (present: unknown) => boolean): boolean => value === undefined || valid(value);
 const ATTESTATION_ANCHOR_KINDS = new Set(["storage-program", "ipfs", "https"]);
 
-/** Exact wire spelling: bare lowercase 64-hex, with no prefix, case folding or separator variants. */
-const wireSha256Ok = (value: unknown): boolean => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+/** True only for a bare lowercase 64-digit hex string, the one spelling the pinned SDK accepts for a content hash. */
+export const wireSha256Ok = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+
+/** An agreement party's bundle hash is a wire sha256 or the same hash behind a lowercase `sha256:` prefix. A DACS-5 bundle party takes only the bare form. */
+const agreementPartyHashOk = (value: unknown): boolean =>
+  wireSha256Ok(value) || (typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value));
 
 /** DACS-2 AttestationRef: an anchor, a sha256 content hash in wire spelling and an optional signer. */
 function attestationRefShapeOk(value: unknown): boolean {
@@ -113,9 +117,7 @@ function attestationRefShapeOk(value: unknown): boolean {
  */
 function agreementPartyShapeOk(value: unknown): boolean {
   const party = rec(value);
-  return Boolean(party && (wireSha256Ok(party.bundleHash) ||
-      (typeof party.bundleHash === "string" && /^sha256:[0-9a-f]{64}$/.test(party.bundleHash))) &&
-    attestationRefShapeOk(party.vetRecordRef));
+  return Boolean(party && agreementPartyHashOk(party.bundleHash) && attestationRefShapeOk(party.vetRecordRef));
 }
 
 const AGREEMENT_PARTY_ROLES = new Set(["buyer", "seller", "bidder-non-winning"]);
@@ -261,7 +263,6 @@ export function signedScope(raw: Record<string, unknown>, kind: ArtifactKind): R
   return scope;
 }
 export const artifactHash = (raw: Record<string, unknown>, kind: ArtifactKind): string => contentHash(signedScope(raw, kind));
-const normalizedHash = (value: unknown): string => typeof value === "string" ? value.replace(/^sha256[:-]/i, "").toLowerCase() : "";
 
 function decodeSignature(value: unknown): Uint8Array | null {
   if (typeof value !== "string") return null;
@@ -333,7 +334,7 @@ function faultAttributionOk(raw: Record<string, unknown>, parties: Record<string
 
 export function isCurrentRef(value: unknown): value is CurrentRef {
   const ref = rec(value); const anchor = rec(ref?.anchor);
-  return Boolean(anchor && anchor.kind === "storage-program" && typeof anchor.locator === "string" && /^stor-[0-9a-f]{40}$/.test(anchor.locator) && /^[0-9a-f]{64}$/.test(normalizedHash(ref?.contentHash)));
+  return Boolean(anchor && anchor.kind === "storage-program" && typeof anchor.locator === "string" && /^stor-[0-9a-f]{40}$/.test(anchor.locator) && wireSha256Ok(ref?.contentHash));
 }
 function shapeOk(raw: Record<string, unknown>, kind: ArtifactKind): boolean {
   if (kind === "agreement") {
@@ -397,7 +398,7 @@ type RefResolution = { ok: true; artifact: ResolvedEvidence } | { ok: false; cau
 
 async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps): Promise<RefResolution> {
   if (!isCurrentRef(ref)) return { ok: false, cause: "bad-ref" };
-  const hash = normalizedHash(ref.contentHash);
+  const hash = ref.contentHash;
   let raw: Record<string, unknown> | null;
   try { raw = await deps.read(ref.anchor.locator); }
   catch { return { ok: false, cause: "read-failed" }; }
@@ -436,7 +437,7 @@ async function verifyCurrentEvidenceGraph(
   const signatures = arr(raw.signatures); const parties = arr(raw.parties);
   if (new Set(parties.map((party) => party.role)).size !== parties.length ||
       !parties.some((party) => party.role === "buyer") || !parties.some((party) => party.role === "seller") ||
-      parties.some((party) => !inSet(party.role, BUNDLE_ROLES) || typeof party.primaryClaim !== "string" || !/^[0-9a-f]{64}$/.test(normalizedHash(party.bundleHash)))) return fail("invalid or duplicate bundle parties");
+      parties.some((party) => !inSet(party.role, BUNDLE_ROLES) || typeof party.primaryClaim !== "string" || !wireSha256Ok(party.bundleHash))) return fail("invalid or duplicate bundle parties");
   if (!faultAttributionOk(raw, parties)) return fail("invalid fault attribution");
   if (!Array.isArray(raw.signatures) || signatures.length !== raw.signatures.length) {
     return fail("bundle signatures contain malformed entries");
@@ -459,7 +460,7 @@ async function verifyCurrentEvidenceGraph(
   const reserveTopLevelRef = (kind: ArtifactKind, value: unknown): "new" | "duplicate-rating" | "invalid" => {
     if (!isCurrentRef(value)) return "invalid";
     const locator = value.anchor.locator;
-    const hash = normalizedHash(value.contentHash);
+    const hash = value.contentHash;
     const existing = topLevelLocators.get(locator);
     if (existing) {
       return kind === "rating" && existing.kind === "rating" && existing.hash === hash
@@ -518,7 +519,7 @@ async function verifyCurrentEvidenceGraph(
   const addNested = async (kind: ArtifactKind, value: unknown): Promise<NestedResolution> => {
     if (!isCurrentRef(value)) return { ok: false, cause: "bad-ref" };
     const key = `${kind}\n${value.anchor.locator}`;
-    const hash = normalizedHash(value.contentHash);
+    const hash = value.contentHash;
     if (seen.has(key)) return { ok: seen.get(key) === hash };
     if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return { ok: false }; }
     const resolution = await resolveRef(kind, value, deps); if (!resolution.ok) return resolution;
@@ -561,20 +562,19 @@ async function verifyCurrentEvidenceGraph(
   }
   const verifiedPhaseRefs = new Set(artifacts.filter((artifact) => artifact.ref &&
     (artifact.kind === "evidence" || artifact.kind === "verify-result" || artifact.kind === "composite")).map((artifact) =>
-    `${artifact.ref!.anchor.locator}\n${normalizedHash(artifact.ref!.contentHash)}`));
+    `${artifact.ref!.anchor.locator}\n${artifact.ref!.contentHash}`));
   for (const phase of arr(raw.phaseSummary)) {
     if (phase.attestationRef === undefined) continue;
     if (!isCurrentRef(phase.attestationRef) ||
-        !verifiedPhaseRefs.has(`${phase.attestationRef.anchor.locator}\n${normalizedHash(phase.attestationRef.contentHash)}`)) {
+        !verifiedPhaseRefs.has(`${phase.attestationRef.anchor.locator}\n${phase.attestationRef.contentHash}`)) {
       return { ...fail("phase attestation reference is outside the verified graph"), signaturesVerified };
     }
   }
   if (artifacts.length >= MAX_GRAPH_ARTIFACTS) return { ...fail("evidence graph exceeds size limit"), signaturesVerified };
   const listingRef = rec(raw.listingRef)!;
   const listed = await deps.resolveListing(listingRef);
-  const listingHash = normalizedHash(listingRef.contentHash);
   const verifiedListing = listed && await verifyStoredListing(listed.raw, listed.locator, resolveKey);
-  if (!verifiedListing || verifiedListing.contentHash !== listingHash || !exactListingTuple(listingRef, listed.raw)) return { ...fail("listing reference failed"), signaturesVerified };
+  if (!verifiedListing || !wireSha256Ok(listingRef.contentHash) || verifiedListing.contentHash !== listingRef.contentHash || !exactListingTuple(listingRef, listed.raw)) return { ...fail("listing reference failed"), signaturesVerified };
   if (agreement && JSON.stringify(agreement.listingRef) !== JSON.stringify(raw.listingRef)) return { ...fail("agreement listing binding failed"), signaturesVerified };
   if (agreement) {
     const agreementParties = arr(agreement.parties);
@@ -587,7 +587,7 @@ async function verifyCurrentEvidenceGraph(
       return { ...fail("agreement artifact does not match the pinned listing pipeline"), signaturesVerified };
     }
   }
-  artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: listingHash });
+  artifacts.push({ kind: "listing", locator: listed.locator, raw: listed.raw, contentHash: verifiedListing.contentHash });
   const authenticated: EvidenceGraph = { profile: "dacs-v0.1", ok: true, bundle: raw,
     bundleContentHash: artifactHash(raw, "bundle"), signaturesVerified, refsVerified: false, artifacts,
     agreement, listing: listed.raw, ratings: artifacts.filter(artifact => artifact.kind === "rating").map(artifact => artifact.raw) };
