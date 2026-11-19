@@ -159,3 +159,52 @@ test("reindex preserves failed seller pending markers while pruning successful s
   assert.deepEqual(rows(staleHash), [], "a successfully indexed seller's removed Listing is pruned");
   assert.equal(rows(unknownHash).length, 1, "partial indexing cannot attribute an unknown hash safely");
 });
+
+
+for (const failedFirst of [false, true]) {
+  test(`duplicate registrations retain pending evidence when ${failedFirst ? "failed" : "successful"} registration runs first`, async (t) => {
+    let now = 1_850_000_000_000;
+    t.mock.method(Date, "now", () => now);
+    const { PINNED_DEMOS_CHAIN_IDENTITY } = await import("../src/catalog/nodeDeployment.js");
+    const { onPinnedChain } = await import("./fixtures/pinned-node.js");
+    const { reindexAll } = await import("../src/catalog/reindexCore.js");
+    const failedHash = (failedFirst ? "b" : "c").repeat(64);
+    const staleHash = (failedFirst ? "d" : "e").repeat(64);
+    const failed = catalog(failedHash, "f".repeat(64)).sellers[0];
+    failed.primaryClaim = `did:demos:agent:${"c".repeat(64)}`;
+    failed.heldListingVersions = [];
+    const unreadAnchor = failed.listings[0].anchor.locator;
+    // A corrupt cached anchor throws only when this registration reads an
+    // unavailable anchor. The duplicate with no anchors still indexes normally.
+    failed.listings[0].anchor = null as unknown as (typeof failed.listings)[number]["anchor"];
+    const successful = catalog(staleHash, "f".repeat(64)).sellers[0];
+    successful.primaryClaim = `did:demos:agent:${"b".repeat(64)}`;
+    successful.heldListingVersions = [];
+    store.publishCatalogChain({ catalogVersion: "1", generatedAt: now, sellers: [failed, successful] },
+      { ...store.loadScanState(), listings: {}, deals: {}, programs: {}, revocations: {}, verifiedRevocations: {} },
+      PINNED_DEMOS_CHAIN_IDENTITY);
+    const duplicates = [
+      { primaryClaim: failed.primaryClaim, displayName: "successful duplicate", listingAnchors: [] },
+      { primaryClaim: failed.primaryClaim, displayName: "failed duplicate", listingAnchors: [unreadAnchor] },
+    ];
+    store.saveRegistrations([
+      ...(failedFirst ? duplicates.toReversed() : duplicates),
+      { primaryClaim: successful.primaryClaim, displayName: "successful seller", listingAnchors: [] },
+    ]);
+    store.admitRevocationCandidates(failedHash, [{ locator: locator(51), contentHash: "unchanged" }]);
+    store.admitRevocationCandidates(staleHash, [{ locator: locator(52), contentHash: "unchanged" }]);
+    now += week;
+    t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+      if (init?.body) return Response.json({ result: 200, response: [] });
+      return new Response("unavailable", { status: 503 });
+    });
+    const logs: string[] = [];
+    const summary = await reindexAll({ log: (line) => logs.push(line), nodeDeployment: onPinnedChain,
+      resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [], errors: [] }) });
+    assert.equal(summary.sellers, 2, "one duplicate and the unrelated seller indexed successfully");
+    assert.equal(logs.filter((line) => line.includes("seller indexing failed")).length, 1,
+      "exactly one duplicate reached the production exception handler");
+    assert.equal(rows(failedHash).length, 1, "any failed registration protects this seller's pending marker");
+    assert.deepEqual(rows(staleHash), [], "the unrelated successful seller can still prune stale evidence");
+  });
+}

@@ -156,6 +156,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     invalidateCatalogChain(served.chainIdentity);
     openChainReadWindow();
     const regs: (Registration & { discovered?: boolean })[] = [];
+    const failedSellerClaims = new Set<string>();
     for (const raw of loadRegistrations()) {
       // The registration and its binding count are checked before any binding is verified;
       // admitted bindings are then verified one at a time.
@@ -172,6 +173,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         parsed = parseRegistration({ ...raw, bundleBindings: bindings });
       }
       if (!parsed.ok) {
+        if (typeof raw?.primaryClaim === "string") {
+          const identity = canonicalDemosAgentClaim(raw.primaryClaim);
+          if (identity) failedSellerClaims.add(identity);
+        }
         omitted.omittedSellers++;
         const claim = typeof raw?.primaryClaim === "string" ? raw.primaryClaim.slice(0, 24) : "invalid claim";
         log(`seller indexing failed (${claim}), omitted from this catalog: ${parsed.error}`);
@@ -457,7 +462,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const allRegs = [...regs, ...discovered.values()];
 
     const sellers = [];
-    const successfullyIndexedHashes: string[] = [];
+    const indexedHashesBySeller = new Map<string, string[]>();
     for (const reg of allRegs) {
       const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
       log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
@@ -468,6 +473,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       }, undefined, opts.commitment, state, needsHistoryReplay).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
+        failedSellerClaims.add(reg.primaryClaim);
         const reason = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
         log(`  seller indexing failed (${reg.primaryClaim.slice(0, 24)}…), omitted from this catalog: ${reason}`);
         return null;
@@ -480,13 +486,18 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           `verified=${record.deals.filter((d) => d.refsVerified).length} completed=${record.reputation.completed}`,
       );
       sellers.push(record);
-      // Prior catalog records establish which stale hashes belong to this
-      // successfully indexed seller, even when its Listing disappeared now.
-      successfullyIndexedHashes.push(...[before, record].flatMap((seller) => seller ? [
+      // Collect by identity, then exclude failures after ALL registrations. A
+      // successful duplicate must not authorize pruning a failed sibling.
+      const hashes = indexedHashesBySeller.get(reg.primaryClaim) ?? [];
+      hashes.push(...[before, record].flatMap((seller) => seller ? [
         ...seller.listings.map((listing) => listing.contentHash),
         ...(seller.heldListingVersions ?? []).map((listing) => listing.contentHash),
       ] : []));
+      indexedHashesBySeller.set(reg.primaryClaim, hashes);
     }
+    const successfullyIndexedHashes = [...indexedHashesBySeller]
+      .filter(([claim]) => !failedSellerClaims.has(claim))
+      .flatMap(([, hashes]) => hashes);
 
     const generatedAt = Date.now();
     const fixtureSeeds = loadFixtureSeeds();
