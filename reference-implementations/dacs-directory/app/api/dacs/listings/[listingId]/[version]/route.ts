@@ -45,7 +45,7 @@ export async function GET(
       ],
     });
   }
-  const read = await readAnchorResult(hit.anchor.locator);
+  const read = await readAnchorResult(hit.anchor.locator, req.signal);
   if (read.status === "unavailable") {
     return NextResponse.json({ error: "listing anchor unavailable: the Demos node could not be read", reason: read.reason }, { status: 503 });
   }
