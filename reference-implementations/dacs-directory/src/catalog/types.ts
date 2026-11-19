@@ -338,6 +338,8 @@ export interface ScanState {
   schemaVersion?: number;
   lastSeenTxId: number;
   lastChainTip?: number;
+  /** Newest transaction id and the local time (ms) the indexer first saw it as the newest. */
+  tipObservation?: { id: number; since: number };
   /** Wall-clock time when lastSeenTxId most recently increased. */
   cursorAdvancedAt?: number;
   /** Descending transaction cursor for the bounded SR-2 consensus-time backfill. */

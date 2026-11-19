@@ -1,10 +1,12 @@
 # DACS Community
 
-**Community-contributed tools, reference implementations, integrations, and apps built on the [DACS](https://github.com/DACS-Agent-commerce/DACS-Standard) agent-commerce standard.**
+**Community-contributed tools, reference implementations, integrations, and apps built on the [DACS (Demos Agent Commerce Standards)](https://github.com/DACS-Agent-commerce/DACS-Standard) agent-commerce standard.**
 
-[![Standard](https://img.shields.io/badge/standard-DACS%20v0.1-2B36D9)](https://github.com/DACS-Agent-commerce/DACS-Standard)
-[![License: MIT](https://img.shields.io/badge/license-MIT-FF4808)](./LICENSE)
+[![Standard](https://img.shields.io/badge/standard-DACS-7C3AED)](https://github.com/DACS-Agent-commerce/DACS-Standard)
+[![License: MIT](https://img.shields.io/badge/license-MIT-7C3AED)](./LICENSE)
 [![Status](https://img.shields.io/badge/contents-non--normative-010109)](#relationship-to-the-standard)
+
+DACS here means Demos Agent Commerce Standards. It is not related to other software or packages called DACS.
 
 DACS specifies the agent commerce lifecycle — `Identify → Vet → Negotiate → Settle → Verify` — as one standard per stage. This repo is where the ecosystem *around* the standard lives: implementations that exercise it, tools that make building against it easier, and integrations that connect it to other stacks.
 

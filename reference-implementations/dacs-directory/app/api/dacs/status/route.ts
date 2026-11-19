@@ -14,6 +14,7 @@ import {
   parseStatusDiagnosticsQuery,
 } from "@/src/catalog/statusDiagnostics";
 import { chainResetRequired, chainResetThreshold, cursorAheadBy } from "@/src/catalog/chainContinuity";
+import { finalityRule, isTipId, readTipObservation, settledFromTip, tipUnchangedMs } from "@/src/catalog/scanFinality";
 
 const RPC = (process.env.DEMOS_RPC ?? "https://demosnode.discus.sh/").replace(/\/$/, "");
 
@@ -27,6 +28,7 @@ export async function GET(req: NextRequest) {
   const catalog = loadCatalog();
   const scan = loadScanState();
 
+  const rule = finalityRule();
   let chainLatestTx: number | null = null;
   try {
     const res = await fetch(RPC + "/", { redirect: "error",
@@ -43,16 +45,23 @@ export async function GET(req: NextRequest) {
         }],
       }),
     });
-    const json = (await storageResponseJson(res)) as { result?: number; response?: Array<{ id?: number }> };
-    const id = json?.result === 200 ? json.response?.[0]?.id : undefined;
-    if (typeof id === "number") chainLatestTx = id;
+    const json = (await storageResponseJson(res)) as { result?: number; response?: Array<{ id?: number } | null> };
+    const row = json?.result === 200 && Array.isArray(json.response) ? json.response[0] : undefined;
+    const id = typeof row === "object" && row !== null ? row.id : undefined;
+    if (isTipId(id)) chainLatestTx = id;
   } catch {
     /* node unreachable — report lag as unknown */
   }
 
   const resetThreshold = chainResetThreshold();
   const aheadBy = chainLatestTx !== null ? cursorAheadBy(scan, chainLatestTx) : null;
-  const cursorProgress = cursorProgressDiagnostics(scan, chainLatestTx);
+  const unchangedMs = chainLatestTx !== null ? tipUnchangedMs(scan.tipObservation, chainLatestTx) : 0;
+  const settled = chainLatestTx !== null ? settledFromTip(chainLatestTx, rule, unchangedMs) : null;
+  const observation = chainLatestTx !== null && unchangedMs > 0 ? readTipObservation(scan.tipObservation) : null;
+  const finalAfter = chainLatestTx !== null && observation !== null && unchangedMs >= rule.seconds * 1_000
+    ? { aboveId: Math.max(0, chainLatestTx - rule.depth), atMs: observation.since + rule.seconds * 1_000 }
+    : undefined;
+  const cursorProgress = cursorProgressDiagnostics(scan, settled, Date.now(), undefined, finalAfter);
   return NextResponse.json({
     generatedAt: catalog.generatedAt,
     scanProgress: catalogScanProgress(catalog),
@@ -61,6 +70,7 @@ export async function GET(req: NextRequest) {
     ).length, 0),
     syncedToTx: scan.lastSeenTxId,
     chainLatestTx,
+    settledTip: settled,
     txsBehind: chainLatestTx !== null ? Math.max(0, chainLatestTx - scan.lastSeenTxId) : null,
     cursorAheadBy: aheadBy,
     chainResetSuspected: chainLatestTx !== null

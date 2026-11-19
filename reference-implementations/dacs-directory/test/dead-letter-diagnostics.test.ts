@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
+import Database from "better-sqlite3";
 
 import { parseStatusDiagnosticsQuery } from "../src/catalog/statusDiagnostics.js";
 import { catalogStatusSchema } from "../src/catalog/contracts.js";
@@ -110,6 +111,109 @@ test("storage cause diagnostics are actionable without claiming DACS absence", (
   assert.doesNotMatch(JSON.stringify(privateDiagnostic), /raw 403 response/);
 });
 
+test("a missing carried withdrawal marker has a bounded public diagnostic", () => {
+  const target = locator("c");
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT",
+    "raw upstream detail ".repeat(1_000), 1);
+
+  const diagnostics = store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics;
+  assert.equal(diagnostics.byCode.STORAGE_WITHDRAWAL_MARKER_ABSENT, 1);
+  assert.equal(diagnostics.items[0].code, "STORAGE_WITHDRAWAL_MARKER_ABSENT");
+  assert.equal(diagnostics.items[0].classification, "unclassified-storage");
+  assert.equal(diagnostics.items[0].attempts, 1);
+  assert.equal(diagnostics.items[0].retryState, "exhausted");
+  assert.match(diagnostics.items[0].message, /read succeeded without the withdrawal marker/);
+  assert.match(diagnostics.items[0].message, /records that read, not the current withdrawal status/);
+  assert.doesNotMatch(diagnostics.items[0].message, /remains unresolved|Verification runs separately|read clears/);
+  assert.ok(diagnostics.items[0].message.length <= 200);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /raw upstream detail/);
+  assert.ok(!store.loadRetryableArtifacts(Date.now() + 60_000).includes(target));
+});
+
+test("a current marker read recovers only the marker-absent failure and resets its lifecycle", () => {
+  const target = locator("d");
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "old read", 1);
+  const historySize = store.failureHistorySize();
+  store.recoverMissingWithdrawalMarkerRead(target);
+  assert.equal(store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.returned, 0);
+  assert.ok(!store.loadRetryableArtifacts(Date.now() + 60_000).includes(target));
+  assert.equal(store.failureHistorySize(), historySize, "recovery preserves failure history");
+  assert.equal(store.observedRevocationCandidate(target), null, "diagnostic cleanup does not cache marker bytes");
+
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "new failure", 1);
+  const again = store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.items[0];
+  assert.equal(again.attempts, 1, "a later failure starts fresh");
+  assert.equal(again.classification, "dacs-artifact", "the current read established the marker's shape");
+
+  const unrelated = locator("e");
+  store.recordArtifactFailure(unrelated, "unknown", "STORAGE_RPC_UNAVAILABLE", "different failure", 1);
+  store.recoverMissingWithdrawalMarkerRead(unrelated);
+  assert.equal(store.indexerDiagnostics({ deadLetterLocator: unrelated }).deadLetterDiagnostics.items[0]?.code,
+    "STORAGE_RPC_UNAVAILABLE", "other failure classes keep their existing lifecycle");
+});
+
+test("marker-absent cleanup preserves the complete earlier observation and failure history", () => {
+  const target = locator("f");
+  const data = { listingId: "earlier", listingVersion: 1, listingContentHash: "a".repeat(64), revokedAt: 1 };
+  store.recordArtifact({ locator: target, kind: "listing-revocation", profile: "dacs-v0.1",
+    owner: `0x${"a".repeat(64)}`, contentHash: "b".repeat(64), data, observedAt: 123, anchorTime: 45 });
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "a later read", 1);
+  const db = new Database(join(dataDirectory, "directory.sqlite"));
+  try {
+    const observation = db.prepare("SELECT kind,profile,owner,content_hash,data_json,observed_at,anchor_time FROM artifacts WHERE locator=?");
+    const history = db.prepare("SELECT * FROM artifact_failure_history WHERE locator=?");
+    const before = observation.get(target);
+    const beforeHistory = history.get(target);
+    store.recoverMissingWithdrawalMarkerRead(target);
+    assert.deepEqual(observation.get(target), before);
+    assert.deepEqual(history.get(target), beforeHistory);
+    assert.deepEqual(store.observedRevocationCandidate(target), data);
+    assert.equal(store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.returned, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) count FROM dead_letters WHERE locator=?").get(target) as { count: number }).count, 0,
+      "recovery removes the stored exhausted-queue row, not only its public projection");
+    assert.deepEqual(db.prepare("SELECT status,error_code,error_message,retry_count,next_retry_at,rejection_count,deferred_at FROM artifacts WHERE locator=?").get(target), {
+      status: "observed", error_code: null, error_message: null, retry_count: 0,
+      next_retry_at: null, rejection_count: 0, deferred_at: null,
+    });
+    db.prepare("UPDATE artifacts SET kind='listing' WHERE locator=?").run(target);
+    store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "another read", 1);
+    const knownKind = observation.get(target);
+    store.recoverMissingWithdrawalMarkerRead(target);
+    assert.deepEqual(observation.get(target), knownKind, "a known earlier artifact kind is retained with its bytes");
+  } finally { db.close(); }
+});
+
+test("marker-absent cleanup is rolled back when its chain read window is discarded", () => {
+  const target = locator("9");
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "before the window", 1);
+  const before = store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.items;
+  store.openChainReadWindow();
+  try {
+    store.recoverMissingWithdrawalMarkerRead(target);
+    assert.equal(store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.returned, 0);
+  } finally { store.revertChainReadWindow(); }
+  assert.deepEqual(store.indexerDiagnostics({ deadLetterLocator: target }).deadLetterDiagnostics.items, before);
+});
+
+test("a current marker read exits a prior periodic content-rejection lifecycle", () => {
+  const target = locator("0");
+  store.recordArtifactFailure(target, "unknown", "ARTIFACT_REJECTED", "earlier rejected content", 1);
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "later marker-less read", 1);
+  const db = new Database(join(dataDirectory, "directory.sqlite"));
+  try {
+    db.prepare("UPDATE artifacts SET deferred_at=17 WHERE locator=?").run(target);
+    store.recoverMissingWithdrawalMarkerRead(target);
+    assert.deepEqual(db.prepare("SELECT status,retry_count,rejection_count,deferred_at,next_retry_at FROM artifacts WHERE locator=?").get(target), {
+      status: "observed", retry_count: 0, rejection_count: 0, deferred_at: null, next_retry_at: null,
+    });
+    assert.ok(!store.loadRetryableArtifacts(Date.now() + 3_600_000).includes(target));
+    store.recordArtifactFailure(target, "unknown", "STORAGE_RPC_UNAVAILABLE", "fresh transient failure", 5);
+    assert.deepEqual(db.prepare("SELECT status,retry_count,rejection_count,deferred_at FROM artifacts WHERE locator=?").get(target), {
+      status: "retry", retry_count: 1, rejection_count: 0, deferred_at: null,
+    });
+  } finally { db.close(); }
+});
+
 test("listing binding rejections are persistent, public-safe, filterable, and recoverable", () => {
   const target = locator("7");
   const claim = `did:demos:agent:${"7".repeat(64)}`;
@@ -184,6 +288,14 @@ test("cursor progress diagnostics distinguish caught-up, stalled, and unknown cu
     now,
     60,
   ).cursorStalled, false);
+  const finalAt = (secondsAgo: number) => ({ aboveId: 10, atMs: now - secondsAgo * 1_000 });
+  const aged = { lastSeenTxId: 10, cursorAdvancedAt: now - 3_600_000 };
+  assert.equal(cursorProgressDiagnostics(aged, 12, now, 60, finalAt(59)).cursorStalled, false);
+  assert.equal(cursorProgressDiagnostics(aged, 12, now, 60, finalAt(60)).cursorStalled, true);
+  assert.equal(cursorProgressDiagnostics(aged, 12, now, 60, finalAt(3_700)).cursorStalled, true, "the cursor moved after");
+  assert.equal(cursorProgressDiagnostics({ ...aged, lastSeenTxId: 9 }, 12, now, 60, finalAt(0)).cursorStalled, true,
+    "ids at or below the boundary have been final since the cursor moved");
+  assert.equal(cursorProgressDiagnostics({ lastSeenTxId: 10 }, 12, now, 60, finalAt(900)).cursorStalled, null);
   assert.equal(cursorProgressDiagnostics({ lastSeenTxId: 10 }, 12, now, 60).cursorStalled, null);
   assert.equal(cursorProgressDiagnostics(
     { lastSeenTxId: 10, cursorAdvancedAt: now },
@@ -193,6 +305,156 @@ test("cursor progress diagnostics distinguish caught-up, stalled, and unknown cu
   ).cursorStalled, null);
 });
 
+const STATUS_NOW = 1_800_000_000_000;
+const SEVEN_HOURS_MS = 7 * 3_600_000;
+
+/**
+ * Status for a scan cursor at `cursor`, advanced seven hours ago, against a node that answers
+ * with the newest `limit` of `chain`. The caller fixes the clock. `limits` collects the limits asked for.
+ */
+async function statusWith(cursor: number, chain: unknown[], limits: unknown[] = [], tipObservation?: unknown) {
+  store.saveScanState({
+    lastSeenTxId: cursor, cursorAdvancedAt: STATUS_NOW - SEVEN_HOURS_MS, listings: {}, deals: {},
+    ...(tipObservation === undefined ? {} : { tipObservation }),
+  } as Parameters<typeof store.saveScanState>[0]);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const limit = JSON.parse(String(init?.body)).params?.[0]?.data?.limit;
+    limits.push(limit);
+    return Response.json({ result: 200, response: chain.slice(0, limit) });
+  };
+  try {
+    const response = await statusRoute.GET(new NextRequest("https://directory.example/api/dacs/status"));
+    return await response.json() as Record<string, unknown>;
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveScanState({ lastSeenTxId: 0, listings: {}, deals: {} });
+  }
+}
+
+test("status reports no stall when the only unindexed transactions are not yet settled", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const recent = await statusWith(1268, [{ id: 1270 }, { id: 1269 }, { id: 1268 }]);
+  assert.equal(recent.chainLatestTx, 1270);
+  assert.equal(recent.settledTip, 1268);
+  assert.equal(recent.cursorStalled, false);
+});
+
+test("a quiet chain shows no stall once the stored first sighting of its tip is old enough and it is indexed", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const chain = [{ id: 1270 }, { id: 1269 }, { id: 1268 }];
+  const seenAt = (agoMs: number) => ({ id: 1270, since: STATUS_NOW - agoMs });
+  const first = await statusWith(1270, chain, [], seenAt(0));
+  assert.equal(first.settledTip, 1268);
+  assert.equal(first.cursorStalled, false);
+  assert.equal((await statusWith(1270, chain, [], seenAt(299_000))).settledTip, 1268);
+  const settled = await statusWith(1270, chain, [], seenAt(300_000));
+  assert.equal(settled.settledTip, 1270);
+  assert.equal(settled.cursorStalled, false);
+});
+
+test("status reads the same stored first sighting the indexer writes, so it never sees a longer wait", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const chain = [{ id: 1270 }, { id: 1269 }, { id: 1268 }];
+  const absent = await statusWith(1268, chain);
+  assert.equal(absent.settledTip, 1268, "no stored sighting: the tip was just seen");
+  t.mock.timers.tick(3_600_000);
+  const stillAbsent = await statusWith(1268, chain);
+  assert.equal(stillAbsent.settledTip, 1268, "the status route does not start its own clock");
+  assert.equal(stillAbsent.cursorStalled, false, "the cursor is at the depth-settled tip");
+});
+
+test("a tip that has only just become final is not a stall until the threshold has passed since", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const chain = [{ id: 1270 }, { id: 1269 }, { id: 1268 }];
+  const justFinal = await statusWith(1268, chain, [], { id: 1270, since: STATUS_NOW - 300_000 });
+  assert.equal(justFinal.settledTip, 1270);
+  assert.equal(justFinal.secondsSinceCursorAdvanced, 25_200, "the cursor itself last moved long ago");
+  assert.equal(justFinal.cursorStalled, false);
+  const threshold = justFinal.cursorStallThresholdSeconds as number;
+  const waiting = await statusWith(1268, chain, [], { id: 1270, since: STATUS_NOW - 300_000 - (threshold - 1) * 1_000 });
+  assert.equal(waiting.cursorStalled, false);
+});
+
+test("status reports a stall when the cursor is behind the settled tip past the threshold since it became final", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const chain = [{ id: 1270 }, { id: 1269 }, { id: 1268 }];
+  const threshold = (await statusWith(1268, chain)).cursorStallThresholdSeconds as number;
+  const stalled = await statusWith(1268, chain, [], { id: 1270, since: STATUS_NOW - 300_000 - threshold * 1_000 });
+  assert.equal(stalled.settledTip, 1270);
+  assert.equal(stalled.cursorStalled, true);
+
+  const deep = await statusWith(1000, chain);
+  assert.equal(deep.settledTip, 1268);
+  assert.equal(deep.cursorStalled, true);
+  const deepWithSighting = await statusWith(1000, chain, [], { id: 1270, since: STATUS_NOW - 300_000 });
+  assert.equal(deepWithSighting.settledTip, 1270);
+  assert.equal(deepWithSighting.cursorStalled, true, "ids at the depth boundary were final long before the tip");
+});
+
+test("a stored first sighting of another id, a future time or a corrupt record is treated as just seen", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const chain = [{ id: 1271 }, { id: 1270 }, { id: 1269 }];
+  for (const stored of [
+    { id: 1270, since: STATUS_NOW - 3_600_000 },
+    { id: 1271, since: STATUS_NOW + 1 },
+    { id: 1271, since: "yesterday" },
+    { id: 1271.5, since: 0 },
+    { id: 1271, since: -1 },
+    "1271",
+    null,
+  ]) {
+    assert.equal((await statusWith(1268, chain, [], stored)).settledTip, 1269, JSON.stringify(stored));
+  }
+});
+
+test("status does not use transaction timestamps for the settled tip", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const body = await statusWith(1267, [
+    { id: 1270, timestamp: STATUS_NOW - SEVEN_HOURS_MS },
+    { id: 1269, timestamp: STATUS_NOW - SEVEN_HOURS_MS },
+    { id: 1268, timestamp: STATUS_NOW - 5_000 },
+  ]);
+  assert.equal(body.settledTip, 1268);
+});
+
+test("large transaction rows do not hide the chain tip", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  const large = (id: number) => ({ id, content: "x".repeat(450_000) });
+  const limits: unknown[] = [];
+  const body = await statusWith(1268, [large(1270), large(1269), large(1268)], limits);
+  assert.deepEqual(limits, [1]);
+  assert.equal(body.chainLatestTx, 1270);
+  assert.equal(body.settledTip, 1268);
+  assert.equal(body.cursorStalled, false);
+});
+
+test("status reports an unknown tip for a malformed node reply instead of failing", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  for (const chain of [[null], ["x"], [7], [{ id: "1270" }], [], [{ id: 2.5 }], [{ id: -5 }], [{ id: 1e300 }]]) {
+    const body = await statusWith(1268, chain);
+    assert.equal(body.chainLatestTx, null, JSON.stringify(chain));
+    assert.equal(body.settledTip, null, JSON.stringify(chain));
+    assert.equal(body.cursorStalled, null, JSON.stringify(chain));
+  }
+});
+
+test("status leaves the settled tip unknown when the node cannot be read", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: STATUS_NOW });
+  store.saveScanState({ lastSeenTxId: 1268, cursorAdvancedAt: STATUS_NOW - SEVEN_HOURS_MS, listings: {}, deals: {} });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("node unreachable"); };
+  try {
+    const body = await (await statusRoute.GET(new NextRequest("https://directory.example/api/dacs/status"))).json() as Record<string, unknown>;
+    assert.equal(body.chainLatestTx, null);
+    assert.equal(body.settledTip, null);
+    assert.equal(body.cursorStalled, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+    store.saveScanState({ lastSeenTxId: 0, listings: {}, deals: {} });
+  }
+});
+
 test("status route rejects unsafe queries and exposes a safe exact-locator result", async () => {
   const invalid = await statusRoute.GET(new NextRequest(
     "https://directory.example/api/dacs/status?deadLetterLimit=101",
@@ -200,7 +462,7 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
   assert.equal(invalid.status, 400);
 
   const target = locator("5");
-  store.recordArtifactFailure(target, "unknown", "STORAGE_UNREADABLE", "raw RPC secret", 1);
+  store.recordArtifactFailure(target, "unknown", "STORAGE_WITHDRAWAL_MARKER_ABSENT", "raw RPC secret", 1);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
     result: 200, response: [{ id: 123 }],
@@ -217,6 +479,7 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
       "status response contains every property required by its published schema",
     );
     assert.equal(body.chainLatestTx, 123);
+    assert.equal(body.settledTip, 121);
     assert.equal(body.cursorAheadBy, 0);
     assert.equal(body.chainResetSuspected, false);
     assert.equal(body.cursorAdvancedAt, null);
@@ -225,6 +488,7 @@ test("status route rejects unsafe queries and exposes a safe exact-locator resul
     const indexer = body.indexer as ReturnType<typeof store.indexerDiagnostics>;
     assert.equal(indexer.deadLetterDiagnostics.returned, 1);
     assert.equal(indexer.deadLetterDiagnostics.items[0].locator, target);
+    assert.equal(indexer.deadLetterDiagnostics.items[0].code, "STORAGE_WITHDRAWAL_MARKER_ABSENT");
     assert.equal(indexer.deadLetterDiagnostics.items[0].classification, "unclassified-storage");
     assert.doesNotMatch(JSON.stringify(indexer.deadLetterDiagnostics), /raw RPC secret/);
   } finally {

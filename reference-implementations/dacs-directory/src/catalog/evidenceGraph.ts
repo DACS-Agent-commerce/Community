@@ -96,7 +96,6 @@ const nonNegativeNumberOk = (value: unknown): boolean => typeof value === "numbe
 const optional = (value: unknown, valid: (present: unknown) => boolean): boolean => value === undefined || valid(value);
 const ATTESTATION_ANCHOR_KINDS = new Set(["storage-program", "ipfs", "https"]);
 
-/** Exact wire spelling: bare lowercase 64-hex, with no prefix, case folding or separator variants. */
 /** True only for a bare lowercase 64-digit hex string, the one spelling the pinned SDK accepts for a content hash. */
 export const wireSha256Ok = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 
@@ -394,25 +393,24 @@ export async function verifiedDiscoveryAgreement(raw: Record<string, unknown>): 
   } catch { return false; }
 }
 
-/**
- * Why a reference could not be resolved; it is appended to the graph's failure reason. `too-large` means the reader
- * returned an artifact over the graph's size limit; an artifact the reader itself refuses as too large reads as `read-failed`.
- */
 type RefFailureCause = "bad-ref" | "read-failed" | "too-large" | "shape" | "hash-mismatch" | "signature";
+type RefResolution = { ok: true; artifact: ResolvedEvidence } | { ok: false; cause: RefFailureCause };
 
-async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps): Promise<ResolvedEvidence | { cause: RefFailureCause }> {
-  if (!isCurrentRef(ref)) return { cause: "bad-ref" };
+async function resolveRef(kind: ArtifactKind, ref: unknown, deps: EvidenceGraphDeps): Promise<RefResolution> {
+  if (!isCurrentRef(ref)) return { ok: false, cause: "bad-ref" };
   const hash = ref.contentHash;
-  const raw = await deps.read(ref.anchor.locator);
-  if (!raw) return { cause: "read-failed" };
-  if (!withinArtifactLimit(raw)) return { cause: "too-large" };
-  if (kind === "attestation") {
-    return contentHash(raw) === hash ? { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash } : { cause: "hash-mismatch" };
+  let raw: Record<string, unknown> | null;
+  try { raw = await deps.read(ref.anchor.locator); }
+  catch { return { ok: false, cause: "read-failed" }; }
+  // The reader exposes only object/null: its underlying refusal causes are unavailable here.
+  if (!raw) return { ok: false, cause: "read-failed" };
+  if (!withinArtifactLimit(raw)) return { ok: false, cause: "too-large" };
+  if (kind !== "attestation" && !shapeOk(raw, kind)) return { ok: false, cause: "shape" };
+  if ((kind === "attestation" ? contentHash(raw) : artifactHash(raw, kind)) !== hash) return { ok: false, cause: "hash-mismatch" };
+  if (kind !== "attestation" && !(await signatureOk(raw, kind, deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey))) {
+    return { ok: false, cause: "signature" };
   }
-  if (!shapeOk(raw, kind)) return { cause: "shape" };
-  if (artifactHash(raw, kind) !== hash) return { cause: "hash-mismatch" };
-  if (!(await signatureOk(raw, kind, deps.resolvePrimaryClaimKey ?? resolveDemosPrimaryClaimKey))) return { cause: "signature" };
-  return { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash };
+  return { ok: true, artifact: { kind, ref, locator: ref.anchor.locator, raw, contentHash: hash } };
 }
 
 export async function buildCurrentEvidenceGraph(bundleLocator: string, deps: EvidenceGraphDeps): Promise<EvidenceGraph> {
@@ -476,8 +474,9 @@ async function verifyCurrentEvidenceGraph(
   let agreement: Record<string, unknown> | undefined;
   if (raw.agreementRef !== undefined) {
     if (reserveTopLevelRef("agreement", raw.agreementRef) !== "new") return { ...fail("duplicate or invalid top-level reference"), signaturesVerified };
-    const resolved = await resolveRef("agreement", raw.agreementRef, deps);
-    if ("cause" in resolved) return { ...fail(`agreement reference failed: ${resolved.cause}`), signaturesVerified };
+    const resolution = await resolveRef("agreement", raw.agreementRef, deps);
+    if (!resolution.ok) return { ...fail(`agreement reference failed: ${resolution.cause}`), signaturesVerified };
+    const resolved = resolution.artifact;
     if (resolved.raw.jobId !== raw.jobId) return { ...fail("agreement belongs to another job"), signaturesVerified };
     artifacts.push(resolved); agreement = resolved.raw;
   } else if (!abort) return { ...fail("non-abort bundle has no agreement"), signaturesVerified };
@@ -487,8 +486,9 @@ async function verifyCurrentEvidenceGraph(
       const reserved = reserveTopLevelRef(kind, ref);
       if (reserved === "invalid") return { ...fail("duplicate or invalid top-level reference"), signaturesVerified };
       if (reserved === "duplicate-rating") continue;
-      const resolved = await resolveRef(kind, ref, deps);
-      if ("cause" in resolved) return { ...fail(`${kind} reference failed: ${resolved.cause}`), signaturesVerified };
+      const resolution = await resolveRef(kind, ref, deps);
+      if (!resolution.ok) return { ...fail(`${kind} reference failed: ${resolution.cause}`), signaturesVerified };
+      const resolved = resolution.artifact;
       if ((kind === "evidence" || kind === "rating" || kind === "composite") && resolved.raw.jobId !== raw.jobId) return { ...fail(`${kind} belongs to another job`), signaturesVerified };
       if (kind === "rating") {
         const target = parties.find((party) => sameSigningIdentity(party.primaryClaim, resolved.raw.target));
@@ -511,41 +511,53 @@ async function verifyCurrentEvidenceGraph(
     `${artifact.kind}\n${artifact.locator}`, artifact.contentHash,
   ]));
   let graphLimitExceeded = false;
-  const addNested = async (kind: ArtifactKind, value: unknown): Promise<boolean> => {
-    if (!isCurrentRef(value)) return false;
+  type NestedResolution = { ok: true } | { ok: false; cause?: RefFailureCause };
+  const nestedFailure = (reason: string, result: NestedResolution): EvidenceGraph => ({
+    ...fail(graphLimitExceeded ? "evidence graph exceeds size limit"
+      : `${reason}${!result.ok && result.cause ? `: ${result.cause}` : ""}`), signaturesVerified,
+  });
+  const addNested = async (kind: ArtifactKind, value: unknown): Promise<NestedResolution> => {
+    if (!isCurrentRef(value)) return { ok: false, cause: "bad-ref" };
     const key = `${kind}\n${value.anchor.locator}`;
     const hash = value.contentHash;
-    if (seen.has(key)) return seen.get(key) === hash;
-    if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return false; }
-    const nested = await resolveRef(kind, value, deps); if ("cause" in nested) return false;
-    if ((kind === "evidence" || kind === "composite") && nested.raw.jobId !== raw.jobId) return false;
+    if (seen.has(key)) return { ok: seen.get(key) === hash };
+    if (artifacts.length >= MAX_GRAPH_ARTIFACTS) { graphLimitExceeded = true; return { ok: false }; }
+    const resolution = await resolveRef(kind, value, deps); if (!resolution.ok) return resolution;
+    const nested = resolution.artifact;
+    if ((kind === "evidence" || kind === "composite") && nested.raw.jobId !== raw.jobId) return { ok: false };
     if (kind === "evidence" && !parties.some((party) =>
-      sameSigningIdentity(party.primaryClaim, rec(nested.raw.signature)?.signer))) return false;
-    seen.set(key, nested.contentHash); artifacts.push(nested); return true;
+      sameSigningIdentity(party.primaryClaim, rec(nested.raw.signature)?.signer))) return { ok: false };
+    seen.set(key, nested.contentHash); artifacts.push(nested); return { ok: true };
   };
   for (let index = 0; index < artifacts.length; index++) {
     const artifact = artifacts[index];
     if (artifact.kind === "composite") {
       for (const key of ["freshness", "dealSpecific"] as const) for (const value of Array.isArray(artifact.raw[key]) ? artifact.raw[key] as unknown[] : []) {
-        if (!(await addNested("verify-result", value))) return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "nested VerifyResult reference failed"), signaturesVerified };
+        const result = await addNested("verify-result", value);
+        if (!result.ok) return nestedFailure("nested VerifyResult reference failed", result);
       }
-      for (const signal of arr(artifact.raw.supplementary)) if (signal.attestation !== undefined && !(await addNested("attestation", signal.attestation))) {
-        return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "supplementary attestation reference failed"), signaturesVerified };
+      for (const signal of arr(artifact.raw.supplementary)) if (signal.attestation !== undefined) {
+        const result = await addNested("attestation", signal.attestation);
+        if (!result.ok) return nestedFailure("supplementary attestation reference failed", result);
       }
     }
     if (artifact.kind === "evidence") {
-      if (artifact.raw.attestationRef !== undefined && !(await addNested("attestation", artifact.raw.attestationRef))) {
-        return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "delivery attestation reference failed"), signaturesVerified };
+      if (artifact.raw.attestationRef !== undefined) {
+        const result = await addNested("attestation", artifact.raw.attestationRef);
+        if (!result.ok) return nestedFailure("delivery attestation reference failed", result);
       }
       for (const value of Array.isArray(artifact.raw.amendmentRefs) ? artifact.raw.amendmentRefs as unknown[] : []) {
-        if (!(await addNested("evidence", value))) return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "settlement amendment reference failed"), signaturesVerified };
+        const result = await addNested("evidence", value);
+        if (!result.ok) return nestedFailure("settlement amendment reference failed", result);
       }
-      for (const key of ["supersedesEvidenceRef", "amendsEvidenceRef"] as const) if (artifact.raw[key] !== undefined && !(await addNested("evidence", artifact.raw[key]))) {
-        return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "settlement evidence chain failed"), signaturesVerified };
+      for (const key of ["supersedesEvidenceRef", "amendsEvidenceRef"] as const) if (artifact.raw[key] !== undefined) {
+        const result = await addNested("evidence", artifact.raw[key]);
+        if (!result.ok) return nestedFailure("settlement evidence chain failed", result);
       }
     }
-    if (artifact.kind === "verify-result" && !(await addNested("attestation", artifact.raw.attestation))) {
-      return { ...fail(graphLimitExceeded ? "evidence graph exceeds size limit" : "VerifyResult attestation reference failed"), signaturesVerified };
+    if (artifact.kind === "verify-result") {
+      const result = await addNested("attestation", artifact.raw.attestation);
+      if (!result.ok) return nestedFailure("VerifyResult attestation reference failed", result);
     }
   }
   const verifiedPhaseRefs = new Set(artifacts.filter((artifact) => artifact.ref &&
