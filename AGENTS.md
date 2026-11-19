@@ -70,12 +70,23 @@ Spec MCP server (from `tools/dacs-spec-mcp`, Python 3.10 or newer):
 
 ```bash
 ./setup_spec.sh
-for p in python3 python3.13 python3.12 python3.11 python3.10; do
-  if command -v "$p" >/dev/null && "$p" -c "import sys; sys.exit(sys.version_info < (3, 10))"; then PY=$p; break; fi
+(
+dacs_spec_python=
+for dacs_spec_candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10; do
+  if command -v "$dacs_spec_candidate" >/dev/null 2>&1 &&
+    "$dacs_spec_candidate" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+    dacs_spec_python=$dacs_spec_candidate
+    break
+  fi
 done
-"$PY" -m venv venv
+if [ -z "$dacs_spec_python" ]; then
+  printf '%s\n' 'Python 3.10 or newer required' >&2
+  exit 1
+fi
+"$dacs_spec_python" -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ./venv/bin/python smoke_test.py
+)
 ```
 
 ## Main entry points
