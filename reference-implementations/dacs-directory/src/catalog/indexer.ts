@@ -400,7 +400,13 @@ export async function indexRegistration(
     }
     // The catalog can publish neither "active" for an indeterminate check (a reader would take it
     // as absent, RB-6) nor "revoked" without a binding (RB-3), so the listing waits for a later pass.
-    if (revocation === "indeterminate") continue;
+    if (revocation === "indeterminate") {
+      // This is still a live Listing, withheld while its marker is unresolved.
+      // Keep its hash in the stored held set so retention cannot discard the
+      // very candidate that prevents publishing it as active.
+      heldListingVersions.push({ locator: anchor, listingId, version, contentHash: verified.contentHash });
+      continue;
+    }
     // §6.3.6 / RB-2: SDK catalog clients derive the logical address from, and match the
     // revocation binding against, the exact signed `presentedBy`, CF-3 parameters included.
     // Only the summary is withheld; the verified artifact above stays deal evidence.

@@ -518,7 +518,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
             (prior.scanProgress?.cursor ?? -1) > state.lastSeenTxId
             ? state.cursorAdvancedAt ?? null
             : prior.scanProgress?.cursorAdvancedAt ?? null,
-          lastSuccessfulFullScanAt: completedAt, fromTx: sinceTxId } }, state, served.chainIdentity);
+          lastSuccessfulFullScanAt: completedAt, fromTx: sinceTxId } }, state, served.chainIdentity, !crawlIncomplete);
       finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: completedScan.chainTip, txs: completedScan.txsScanned,
         artifacts: completedScan.observations.length, rejected: completedScan.failures.length });
     });

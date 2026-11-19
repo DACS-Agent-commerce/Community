@@ -207,6 +207,12 @@ db.transaction(() => {
   if (!columns.some((entry) => entry.name === "carried")) {
     db.exec("ALTER TABLE revocation_candidates ADD COLUMN carried INTEGER NOT NULL DEFAULT 0");
   }
+  if (!columns.some((entry) => entry.name === "value_seen_at")) {
+    db.exec("ALTER TABLE revocation_candidates ADD COLUMN value_seen_at INTEGER NOT NULL DEFAULT 0");
+    // Unknown historical ages get the full retention window on upgrade.
+    db.prepare("UPDATE revocation_candidates SET value_seen_at=?").run(Date.now());
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS revocation_candidates_age_idx ON revocation_candidates(value_seen_at)");
 }).immediate();
 
 // Add internal omission counters without changing the public diagnostic projection.
@@ -495,11 +501,13 @@ db.transaction(() => {
  */
 export interface RevocationCandidateObservation { locator: string; owner?: string | null; contentHash?: string | null; carried?: boolean }
 const nextCandidateSeq = db.prepare("SELECT COALESCE(MAX(seq),0) + 1 seq FROM revocation_candidates");
-const upsertCandidate = db.prepare(`INSERT INTO revocation_candidates(listing_hash,locator,owner,content_hash,seq,state,carried)
-  VALUES (@listingHash,@locator,@owner,@contentHash,@seq,'pending',@carried)
+const upsertCandidate = db.prepare(`INSERT INTO revocation_candidates(listing_hash,locator,owner,content_hash,seq,state,carried,value_seen_at)
+  VALUES (@listingHash,@locator,@owner,@contentHash,@seq,'pending',@carried,@now)
   ON CONFLICT(listing_hash,locator) DO UPDATE SET
     owner=COALESCE(excluded.owner,revocation_candidates.owner),
     carried=MAX(excluded.carried,revocation_candidates.carried),
+    value_seen_at=CASE WHEN excluded.content_hash IS NOT NULL
+      AND excluded.content_hash IS NOT revocation_candidates.content_hash THEN excluded.value_seen_at ELSE revocation_candidates.value_seen_at END,
     content_hash=COALESCE(excluded.content_hash,revocation_candidates.content_hash),
     seq=CASE WHEN revocation_candidates.state='rejected' AND excluded.content_hash IS NOT NULL
       AND excluded.content_hash IS NOT revocation_candidates.content_hash THEN excluded.seq ELSE revocation_candidates.seq END,
@@ -511,7 +519,7 @@ export const admitRevocationCandidates = db.transaction(
     for (const candidate of candidates) {
       upsertCandidate.run({ listingHash, locator: candidate.locator, seq: seq++,
         owner: candidate.owner ? canonicalProgramOwner(candidate.owner) : null, contentHash: candidate.contentHash ?? null,
-        carried: candidate.carried ? 1 : 0 });
+        carried: candidate.carried ? 1 : 0, now: Date.now() });
     }
   },
 );
@@ -1011,8 +1019,24 @@ export const resetCatalogChain = db.transaction((evidenceChain: string, replacem
   invalidateCatalogChain(evidenceChain);
   return state;
 });
+const REVOCATION_CANDIDATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const pruneCandidates = db.prepare(`DELETE FROM revocation_candidates WHERE value_seen_at <= ?
+  AND (state = 'rejected' OR listing_hash NOT IN (SELECT value FROM json_each(?)))`);
 /** Publish a completed pass's catalog, scanner/schema and readiness atomically; throws on failed storage. */
-export const publishCatalogChain = db.transaction((catalog: Catalog, state: ScanState, evidenceChain: string): void => {
+export const publishCatalogChain = db.transaction((catalog: Catalog, state: ScanState, evidenceChain: string,
+  discoveryComplete = false): void => {
+  if (discoveryComplete) {
+    // Unchanged re-observations do not extend retention. Rejected or unmatched
+    // values age out after a week; changed values start a new window. Pending
+    // candidates for visible and held Listings survive for as long as needed.
+    // An incomplete crawl or a single-registration refresh cannot establish
+    // that a Listing is no longer present; only full reindex opts into pruning.
+    const retained = catalog.sellers.flatMap((seller) => [
+      ...seller.listings.filter((listing) => listing.status !== "revoked").map((listing) => listing.contentHash),
+      ...(seller.heldListingVersions ?? []).map((listing) => listing.contentHash),
+    ]);
+    pruneCandidates.run(Date.now() - REVOCATION_CANDIDATE_RETENTION_MS, JSON.stringify([...new Set(retained)]));
+  }
   saveScanState({ ...state, schemaVersion: SCAN_STATE_SCHEMA_VERSION });
   saveCatalog(catalog);
   setJson("catalog-chain", { evidenceChain, readySchema: SCAN_STATE_SCHEMA_VERSION });
