@@ -24,7 +24,7 @@ software or packages called DACS.
 | `tools/` | Developer tooling. Today: `dacs-spec-mcp/` (a Python MCP server that serves the pinned spec text) and `lint/` (the repo's ESLint setup) |
 | `integrations/` | Bridges to other stacks. Only a README so far |
 | `examples/` | Worked sessions and sample artifacts. Only a README so far |
-| `docs/` | Repo-level docs. `codex-local-workflow.md` is the isolated local verification workflow for the directory app |
+| `docs/` | Repo-level docs. `codex-local-workflow.md` is the isolated local verification workflow for the directory app. `docs/learn/` holds short explainer pages that answer one question each about agent commerce with DACS |
 | `.github/workflows/` | CI: `dacs-directory-ci.yml` (typecheck, test, build) and `lint.yml` (ESLint) |
 | `INDEX.md` | Catalogue of accepted submissions, in-tree and external |
 

@@ -22,7 +22,7 @@ Someone still has to go first: either the buyer pays first or the seller deliver
 2. **The right destination.** A payee-bound Agreement carries the destination for each payment step. A legacy Agreement (`commit-agreement`) carries none, so these checks do not apply to it.
    The payment handler must not submit to any other destination, and a mismatch fails before payment.
    The payer also checks that the destination is bound to the payee's primary identity claim ([DACS-4, section 9.5.1, rules PB-1 and PB-2](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#951-common-contract)).
-3. **A payment counts once it is final.** A payment step reports `ok: true` only when the payment is confirmed at the chain's finality.
+3. **A payment counts once it is final.** A payment step reports `ok: true` only when the payment is confirmed under its rail's finality rules. For a payment provider rail that means funds captured at the provider, which is not the same as irreversible ([DACS-4, section 9.5.6, rule AP2-4](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#956-pay-ap2)).
    It anchors settlement evidence ([DACS-4, section 9.5.1, rules PC-2 and PC-4](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#951-common-contract)).
 4. **A fixed order.** The Listing declares the order of payment and delivery steps, and that order is binding.
    If payment comes first, delivery does not run until payment returns `ok: true`.
