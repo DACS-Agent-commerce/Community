@@ -20,13 +20,13 @@ What a Listing can do today:
 - **Pay, then deliver.** The buyer carries the risk that delivery does not happen.
 - **Deliver, then pay.** The seller carries the risk that payment does not happen.
 
-The seller chooses the order in the Listing, and the Standard says a seller whose delivery is costly or cannot be undone should choose the order that shifts the risk it cares about, accepting the risk that remains ([DACS-4, section 9.13](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#913-security-considerations)).
+The Listing publisher chooses the order in the Listing (usually the seller; in a procurement Listing it is the buyer), and the Standard says a seller whose delivery is costly or cannot be undone should choose the order that shifts the risk it cares about, accepting the risk that remains ([DACS-4, section 9.13](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#913-security-considerations)).
 
 Other things DACS does around this:
 
 - **A missing delivery is recorded.** The delivery step returns `ok: false` when the deliverable is missing, and DACS-5 records the failure, which affects reputation ([DACS-4, section 9.13](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#913-security-considerations)).
-- **A cross-chain payment is atomic.** A payment on one chain and the value received on another either both succeed or both refund within a bounded time ([DACS-4, section 9.8](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#98-cross-chain-atomic-settlement-sr-5)).
-- **A refund is recorded.** It is a signed amendment anchored after the original settlement evidence ([DACS-4, section 9.7.1](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#971-refunds-and-partial-refunds)).
+- **A cross-chain payment is atomic.** A payment on one chain and the value received on another either both succeed or both refund within a bounded time. One state is outside the refund arm: if the preimage is revealed but the payee's claim on the source chain has not landed, the source must not be refunded, and the session waits in an open state until the claim lands or the window expires ([DACS-4, section 9.8](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#98-cross-chain-atomic-settlement-sr-5)).
+- **A refund of a settled payment is recorded.** It is a signed amendment anchored after the original settlement evidence. A payment that never settled is unwound on the rail's own refund path, such as a timelock refund, not by an amendment ([DACS-4, section 9.7.1](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#971-refunds-and-partial-refunds)).
 
 The Directory in this repository does not hold or move funds ([how it works page](../../reference-implementations/dacs-directory/app/how-it-works/page.tsx)).
 
