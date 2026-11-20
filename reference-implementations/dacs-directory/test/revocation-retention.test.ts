@@ -25,7 +25,7 @@ const catalog = (live: string, held: string): Catalog => ({ catalogVersion: "1",
   reputation: { completed: 0, totalAgreements: 0, completionRate: null }, registeredAt: 1, lastIndexedAt: 1,
 }] });
 
-test("completed publication prunes aged rejected and unmatched candidates but keeps pending live and held candidates", (t) => {
+test("completed publication prunes only aged rejected candidates and keeps all pending candidates", (t) => {
   let now = 1_800_000_000_000;
   t.mock.method(Date, "now", () => now);
   const live = "1".repeat(64), held = "2".repeat(64), absent = "3".repeat(64);
@@ -42,8 +42,8 @@ test("completed publication prunes aged rejected and unmatched candidates but ke
   store.publishCatalogChain(catalog(live, held), store.loadScanState(), "retention-chain", true);
   assert.deepEqual(rows(live), [{ locator: locator(2), state: "pending" }]);
   assert.deepEqual(rows(held), [{ locator: locator(3), state: "pending" }]);
-  assert.deepEqual(rows(absent), [], "removed, expired and never-listed hashes are unmatched");
-  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM revocation_candidate_retries WHERE listing_hash=?").get(absent) as { n: number }).n, 0);
+  assert.deepEqual(rows(absent), [{ locator: locator(4), state: "pending" }], "unmatched pending evidence survives");
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM revocation_candidate_retries WHERE listing_hash=?").get(absent) as { n: number }).n, 1, "pending retry metadata survives with its candidate");
 });
 
 test("unchanged observations do not renew age, but changed values reopen rejection with a fresh window", (t) => {
@@ -60,10 +60,11 @@ test("unchanged observations do not renew age, but changed values reopen rejecti
   now++;
   store.publishCatalogChain({ catalogVersion: "1", generatedAt: now, sellers: [] }, store.loadScanState(), "retention-chain", true);
   assert.equal(rows(hash).length, 1, "a newly changed value gets a full week");
+  store.recordRevocationProgress(hash, { unread: [], rejected: [at] });
   now += week - 1;
   store.admitRevocationCandidates(hash, [{ locator: at, contentHash: "changed" }]);
   store.publishCatalogChain({ catalogVersion: "1", generatedAt: now, sellers: [] }, store.loadScanState(), "retention-chain", true);
-  assert.deepEqual(rows(hash), [], "unchanged observations cannot keep unmatched rows forever");
+  assert.deepEqual(rows(hash), [], "unchanged observations cannot keep rejected rows forever");
 });
 
 test("incomplete discovery and failed publication cannot discard aged candidates", (t) => {
@@ -71,6 +72,7 @@ test("incomplete discovery and failed publication cannot discard aged candidates
   t.mock.method(Date, "now", () => now);
   const hash = "5".repeat(64);
   store.admitRevocationCandidates(hash, [{ locator: locator(20) }]);
+  store.recordRevocationProgress(hash, { unread: [], rejected: [locator(20)] });
   now += week;
   const empty: Catalog = { catalogVersion: "1", generatedAt: now, sellers: [] };
   store.publishCatalogChain(empty, store.loadScanState(), "retention-chain");
@@ -120,7 +122,7 @@ test("an aged pending owner marker survives publication when it withholds a newl
 });
 
 
-test("reindex preserves failed seller pending markers while pruning successful seller stale candidates", async (t) => {
+test("reindex preserves failed seller pending markers while pruning successful seller aged rejected candidates", async (t) => {
   let now = 1_840_000_000_000;
   t.mock.method(Date, "now", () => now);
   const { PINNED_DEMOS_CHAIN_IDENTITY } = await import("../src/catalog/nodeDeployment.js");
@@ -144,6 +146,7 @@ test("reindex preserves failed seller pending markers while pruning successful s
   for (const [hash, n] of [[failedHash, 41], [staleHash, 42], [unknownHash, 43]] as const) {
     store.admitRevocationCandidates(hash, [{ locator: locator(n), contentHash: "unchanged" }]);
   }
+  store.recordRevocationProgress(staleHash, { unread: [], rejected: [locator(42)] });
   now += week;
   t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
     if (init?.body) return Response.json({ result: 200, response: [] });
@@ -156,7 +159,7 @@ test("reindex preserves failed seller pending markers while pruning successful s
   assert.ok(logs.some((line) => line.includes("seller indexing failed")), "the production caller caught the indexing exception");
   assert.deepEqual(store.loadStoredCatalog().sellers.map((seller) => seller.primaryClaim), [successful.primaryClaim]);
   assert.equal(rows(failedHash).length, 1, "an omitted seller's pending evidence survives");
-  assert.deepEqual(rows(staleHash), [], "a successfully indexed seller's removed Listing is pruned");
+  assert.deepEqual(rows(staleHash), [], "a successfully indexed seller's aged rejected candidate is pruned");
   assert.equal(rows(unknownHash).length, 1, "partial indexing cannot attribute an unknown hash safely");
 });
 
@@ -193,6 +196,7 @@ for (const failedFirst of [false, true]) {
     ]);
     store.admitRevocationCandidates(failedHash, [{ locator: locator(51), contentHash: "unchanged" }]);
     store.admitRevocationCandidates(staleHash, [{ locator: locator(52), contentHash: "unchanged" }]);
+    store.recordRevocationProgress(staleHash, { unread: [], rejected: [locator(52)] });
     now += week;
     t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
       if (init?.body) return Response.json({ result: 200, response: [] });
@@ -205,7 +209,7 @@ for (const failedFirst of [false, true]) {
     assert.equal(logs.filter((line) => line.includes("seller indexing failed")).length, 1,
       "exactly one duplicate reached the production exception handler");
     assert.equal(rows(failedHash).length, 1, "any failed registration protects this seller's pending marker");
-    assert.deepEqual(rows(staleHash), [], "the unrelated successful seller can still prune stale evidence");
+    assert.deepEqual(rows(staleHash), [], "the unrelated successful seller can still prune aged rejected evidence");
   });
 }
 
@@ -217,7 +221,7 @@ for (const anchoredFirst of [false, true]) {
     const { PINNED_DEMOS_CHAIN_IDENTITY } = await import("../src/catalog/nodeDeployment.js");
     const { onPinnedChain } = await import("./fixtures/pinned-node.js");
     const { reindexAll } = await import("../src/catalog/reindexCore.js");
-    const failedHash = (anchoredFirst ? "10" : "11").repeat(32);
+    const failedHash = (anchoredFirst ? "16" : "17").repeat(32);
     const staleHash = (anchoredFirst ? "12" : "13").repeat(32);
     const failed = catalog(failedHash, "14".repeat(32)).sellers[0];
     failed.primaryClaim = `did:demos:agent:${"d".repeat(64)}`;
@@ -238,6 +242,7 @@ for (const anchoredFirst of [false, true]) {
     ]);
     store.admitRevocationCandidates(failedHash, [{ locator: locator(61), contentHash: "unchanged" }]);
     store.admitRevocationCandidates(staleHash, [{ locator: locator(62), contentHash: "unchanged" }]);
+    store.recordRevocationProgress(staleHash, { unread: [], rejected: [locator(62)] });
     now += week;
     t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
       if (init?.body) return Response.json({ result: 200, response: [] });
@@ -251,6 +256,6 @@ for (const anchoredFirst of [false, true]) {
       "both the anchored and empty duplicate use the per-seller failure handler");
     assert.deepEqual(store.loadStoredCatalog().sellers.map((seller) => seller.primaryClaim), [successful.primaryClaim]);
     assert.equal(rows(failedHash).length, 1, "the failed seller's aged pending marker survives");
-    assert.deepEqual(rows(staleHash), [], "the unrelated successful seller still prunes stale evidence");
+    assert.deepEqual(rows(staleHash), [], "the unrelated successful seller still prunes aged rejected evidence");
   });
 }
