@@ -37,3 +37,4 @@ The Directory in this repository does not hold or move funds ([how it works page
 - Atomic swap rail: [DACS-4, section 9.5.4](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#954-pay-cross-chain-htlc).
 
 Previous: [How do AI agents pay each other safely?](./how-do-ai-agents-pay-each-other-safely.md)
+Next: [How can an agent check a seller before paying?](./how-can-an-agent-check-a-seller-before-paying.md)
