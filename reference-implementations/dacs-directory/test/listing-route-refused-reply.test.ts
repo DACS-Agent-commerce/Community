@@ -60,3 +60,63 @@ test("the listing route answers 503 with the reason when the stored reply is ref
     });
   } finally { globalThis.fetch = original; }
 });
+
+test("the listing route distinguishes incomplete anchor reads from failed verification", async (t) => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => Response.json({ success: true, owner: `0x${claim.slice(-64)}`, programName: "opaque", data: listing });
+    const record = await indexRegistration(
+      { primaryClaim: claim, displayName: "Refused seller", listingAnchors: [locator] },
+      undefined,
+      async () => { throw new Error("identity unavailable"); },
+    );
+    assert.equal(record.listings.length, 1);
+    store.saveCatalog({ catalogVersion: "1", generatedAt: 1, sellers: [record] });
+
+    const unavailable = "listing anchor unavailable: the Demos node could not be read";
+    const failedVerification = { error: "listing anchor failed verification" };
+    const cases = [
+      {
+        name: "an indexed anchor with a qualified NOT_FOUND reply is unavailable",
+        reply: () => Response.json({ success: false, errorCode: "NOT_FOUND" }, { status: 404 }),
+        status: 503,
+        body: { error: "listing anchor unavailable: the node reports no storage program at the anchor", reason: "anchor not found" },
+      },
+      {
+        name: "an unavailable read retains its specific reason",
+        reply: () => new Response(null, { status: 503 }),
+        status: 503,
+        body: { error: unavailable, reason: "anchor read refused HTTP 503" },
+      },
+      {
+        name: "a successfully read non-object value still fails verification",
+        reply: () => Response.json({ success: true, data: null }),
+        status: 502,
+        body: failedVerification,
+      },
+      {
+        name: "present content changed after signing still fails verification",
+        reply: () => Response.json({ success: true, data: { ...listing, offering: { ...scope.offering, title: "Changed after indexing" } } }),
+        status: 502,
+        body: failedVerification,
+      },
+      {
+        name: "the matching present Listing is still served",
+        reply: () => Response.json({ success: true, data: listing }),
+        status: 200,
+        body: listing,
+      },
+    ];
+    for (const entry of cases) {
+      await t.test(entry.name, async () => {
+        globalThis.fetch = async () => entry.reply();
+        const response = await listingRoute.GET(
+          new NextRequest("https://directory.test/api/dacs/listings/refused-reply/1"),
+          { params: Promise.resolve({ listingId: "refused-reply", version: "1" }) },
+        );
+        assert.equal(response.status, entry.status);
+        assert.deepEqual(await response.json(), entry.body);
+      });
+    }
+  } finally { globalThis.fetch = original; }
+});
