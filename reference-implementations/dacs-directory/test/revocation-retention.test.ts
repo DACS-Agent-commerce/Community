@@ -208,3 +208,49 @@ for (const failedFirst of [false, true]) {
     assert.deepEqual(rows(staleHash), [], "the unrelated successful seller can still prune stale evidence");
   });
 }
+
+
+for (const anchoredFirst of [false, true]) {
+  test(`malformed cached held versions isolate duplicate registrations with no anchors (${anchoredFirst ? "anchored first" : "empty first"})`, async (t) => {
+    let now = 1_860_000_000_000;
+    t.mock.method(Date, "now", () => now);
+    const { PINNED_DEMOS_CHAIN_IDENTITY } = await import("../src/catalog/nodeDeployment.js");
+    const { onPinnedChain } = await import("./fixtures/pinned-node.js");
+    const { reindexAll } = await import("../src/catalog/reindexCore.js");
+    const failedHash = (anchoredFirst ? "10" : "11").repeat(32);
+    const staleHash = (anchoredFirst ? "12" : "13").repeat(32);
+    const failed = catalog(failedHash, "14".repeat(32)).sellers[0];
+    failed.primaryClaim = `did:demos:agent:${"d".repeat(64)}`;
+    failed.heldListingVersions = {} as typeof failed.heldListingVersions;
+    const successful = catalog(staleHash, "15".repeat(32)).sellers[0];
+    successful.primaryClaim = `did:demos:agent:${"e".repeat(64)}`;
+    successful.heldListingVersions = [];
+    store.publishCatalogChain({ catalogVersion: "1", generatedAt: now, sellers: [failed, successful] },
+      { ...store.loadScanState(), listings: {}, deals: {}, programs: {}, revocations: {}, verifiedRevocations: {} },
+      PINNED_DEMOS_CHAIN_IDENTITY);
+    const duplicates = [
+      { primaryClaim: failed.primaryClaim, displayName: "empty duplicate", listingAnchors: [] },
+      { primaryClaim: failed.primaryClaim, displayName: "anchored duplicate", listingAnchors: [failed.listings[0].anchor.locator] },
+    ];
+    store.saveRegistrations([
+      ...(anchoredFirst ? duplicates.toReversed() : duplicates),
+      { primaryClaim: successful.primaryClaim, displayName: "unrelated seller", listingAnchors: [] },
+    ]);
+    store.admitRevocationCandidates(failedHash, [{ locator: locator(61), contentHash: "unchanged" }]);
+    store.admitRevocationCandidates(staleHash, [{ locator: locator(62), contentHash: "unchanged" }]);
+    now += week;
+    t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+      if (init?.body) return Response.json({ result: 200, response: [] });
+      return new Response("unavailable", { status: 503 });
+    });
+    const logs: string[] = [];
+    const summary = await reindexAll({ log: (line) => logs.push(line), nodeDeployment: onPinnedChain,
+      resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [], errors: [] }) });
+    assert.equal(summary.sellers, 1, "the run completes with the unrelated seller");
+    assert.equal(logs.filter((line) => line.includes("seller indexing failed")).length, 2,
+      "both the anchored and empty duplicate use the per-seller failure handler");
+    assert.deepEqual(store.loadStoredCatalog().sellers.map((seller) => seller.primaryClaim), [successful.primaryClaim]);
+    assert.equal(rows(failedHash).length, 1, "the failed seller's aged pending marker survives");
+    assert.deepEqual(rows(staleHash), [], "the unrelated successful seller still prunes stale evidence");
+  });
+}

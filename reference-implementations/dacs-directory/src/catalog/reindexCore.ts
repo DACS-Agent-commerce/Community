@@ -470,7 +470,17 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
-      }, undefined, opts.commitment, state, needsHistoryReplay).catch((error: unknown) => {
+      }, undefined, opts.commitment, state, needsHistoryReplay).then((record) => {
+        // Collect by identity, then exclude failures after ALL registrations. A
+        // successful duplicate must not authorize pruning a failed sibling.
+        const hashes = indexedHashesBySeller.get(reg.primaryClaim) ?? [];
+        hashes.push(...[before, record].flatMap((seller) => seller ? [
+          ...seller.listings.map((listing) => listing.contentHash),
+          ...(seller.heldListingVersions ?? []).map((listing) => listing.contentHash),
+        ] : []));
+        indexedHashesBySeller.set(reg.primaryClaim, hashes);
+        return record;
+      }).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
         failedSellerClaims.add(reg.primaryClaim);
@@ -486,14 +496,6 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
           `verified=${record.deals.filter((d) => d.refsVerified).length} completed=${record.reputation.completed}`,
       );
       sellers.push(record);
-      // Collect by identity, then exclude failures after ALL registrations. A
-      // successful duplicate must not authorize pruning a failed sibling.
-      const hashes = indexedHashesBySeller.get(reg.primaryClaim) ?? [];
-      hashes.push(...[before, record].flatMap((seller) => seller ? [
-        ...seller.listings.map((listing) => listing.contentHash),
-        ...(seller.heldListingVersions ?? []).map((listing) => listing.contentHash),
-      ] : []));
-      indexedHashesBySeller.set(reg.primaryClaim, hashes);
     }
     const successfullyIndexedHashes = [...indexedHashesBySeller]
       .filter(([claim]) => !failedSellerClaims.has(claim))
