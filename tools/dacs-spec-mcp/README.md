@@ -74,21 +74,33 @@ The repo deliberately ships **no vendored spec text**. You run one
 script to fetch the pinned checkout, build a venv, and verify
 everything from end to end.
 
-**Requires Python ≥ 3.10** (the `mcp` SDK does not publish wheels for
-older versions).
+**Requires Python ≥ 3.10** (required by the pinned `mcp` SDK).
 
 ```bash
 # 1. From this directory, clone DACS-Standard at the SPEC_PIN commit.
 #    Creates vendor/DACS-Standard/ and exits non-zero on any failure.
 ./setup_spec.sh
 
-# 2. Build the venv (use python3.10+; python3.12 is what this README was
-#    verified against).
-python3.12 -m venv venv
+# 2. Build the venv with the first available Python 3.10+ interpreter.
+(
+dacs_spec_python=
+for dacs_spec_candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10; do
+  if command -v "$dacs_spec_candidate" >/dev/null 2>&1 &&
+    "$dacs_spec_candidate" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+    dacs_spec_python=$dacs_spec_candidate
+    break
+  fi
+done
+if [ -z "$dacs_spec_python" ]; then
+  printf '%s\n' 'Python 3.10 or newer required' >&2
+  exit 1
+fi
+"$dacs_spec_python" -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
 # 3. Run the smoke test — exits 0 on success.
 ./venv/bin/python smoke_test.py
+)
 ```
 
 The smoke test exercises all seven tools, asserts the locked counts
