@@ -165,6 +165,20 @@ test("public substrate discovery never leaks the indexer's private RPC setting",
   }
 });
 
+test("OpenAPI documents listing-version ambiguity and optional seller disambiguation", () => {
+  const operation = openApiDocument("https://directory.example").paths["/api/dacs/listings/{listingId}/{version}"].get;
+  assert.deepEqual(Object.keys(operation.responses).sort(), ["200", "400", "404", "409", "502", "503"]);
+  const conflict = operation.responses["409"].description;
+  assert.match(conflict, /ambiguous archived listing version/i);
+  assert.match(conflict, /distinct signed Listing/);
+  assert.match(conflict, /pass seller to disambiguate/i);
+  assert.match(conflict, /ambiguity within one seller still returns 409/i);
+  const seller = operation.parameters.find((parameter) => parameter.name === "seller" && parameter.in === "query");
+  assert.ok(seller);
+  assert.notEqual(seller.required, true);
+  assert.match(seller.description ?? "", /disambiguates seller-scoped listing IDs/i);
+});
+
 test("OpenAPI and JSON Schema describe the listing discovery surface", () => {
   const document = openApiDocument("https://directory.example");
   assert.equal(document.openapi, "3.1.0");
