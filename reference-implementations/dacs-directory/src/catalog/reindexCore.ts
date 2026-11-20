@@ -60,6 +60,7 @@ import {
 import type { BundleBinding, Registration } from "./types";
 import type { ResolveRecipe } from "./identityVerification";
 import type { CommitmentVerifier } from "./commitmentFinality";
+import type { TestnetStartupCheck } from "./testnetDeployment.js";
 
 export interface ReindexSummary {
   sellers: number;
@@ -69,6 +70,11 @@ export interface ReindexSummary {
 
 export interface ReindexOptions {
   log?: (line: string) => void;
+  /**
+   * Deployment startup gate, run after interrupted-pass rollback and before any scan work.
+   * The testnet index CLI supplies its profile and compiled-RPC check; a refusal is recorded.
+   */
+  startupCheck?: () => Promise<TestnetStartupCheck>;
   /**
    * Identity resolver injected by tests or alternate deployments. Production
    * CLI/routes use the narrow authenticated fetch implementation in gcr.ts.
@@ -92,6 +98,11 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const { lastSeenTxId } = loadScanState();
     finishScanRun(beginScanRun(lastSeenTxId), { ...omitted, toTx: lastSeenTxId, txs: 0, artifacts: 0, rejected: 0, error });
     throw new Error(error);
+  }
+  if (opts.startupCheck) {
+    const startup = await opts.startupCheck();
+    if (!startup.ok) return refuse(`refusing to start: ${startup.reason}`);
+    log(`pinned chain ${startup.chainIdentity} confirmed`);
   }
   const served = await servedCatalogChain(opts.nodeDeployment);
   if (!served.ok) return refuse(`catalog not updated: ${served.cause}`);

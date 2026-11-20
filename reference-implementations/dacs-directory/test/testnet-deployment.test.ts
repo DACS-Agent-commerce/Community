@@ -154,18 +154,23 @@ test("the startup script exits non-zero on a mainnet profile before contacting a
   assert.match(child.stderr, /refusing to start: DACS_DIRECTORY_NETWORK must be "testnet"/);
 });
 
-test("the index timer fires every five minutes and both units run the startup check before starting", () => {
+test("the timer and units retain startup gates, with index refusals recorded inside the CLI lease", () => {
   assert.match(deployFile("dacs-directory-index.timer"), /^OnCalendar=\*:0\/5$/m);
   assert.match(deployFile("dacs-directory-index.timer"), /^Unit=dacs-directory-index\.service$/m);
   assert.equal(envExample().DACS_INDEX_INTERVAL_SECONDS, "300", "status diagnostics use the timer's interval");
   for (const unit of ["dacs-directory.service", "dacs-directory-index.service"]) {
     const text = deployFile(unit);
-    const check = text.search(/^ExecStartPre=\/usr\/bin\/env npm run --silent check:testnet -- --built$/m);
-    assert.ok(check >= 0 && check < text.search(/^ExecStart=/m), unit);
+    const runtime = text.search(/^ExecStartPre=\/usr\/bin\/env node scripts\/check-node-runtime.mjs$/m);
+    assert.ok(runtime >= 0 && runtime < text.search(/^ExecStart=/m), unit);
     assert.match(text, /^EnvironmentFile=\/etc\/dacs-directory\/directory\.env$/m, unit);
     assert.match(text, /^StateDirectoryMode=0750$/m, `${unit} keeps the data folder at the mode the install guide sets`);
   }
-  assert.match(deployFile("dacs-directory-index.service"), /^ExecStart=\/usr\/bin\/env npm run --silent index$/m);
+  const web = deployFile("dacs-directory.service");
+  const check = web.search(/^ExecStartPre=\/usr\/bin\/env npm run --silent check:testnet -- --built$/m);
+  assert.ok(check >= 0 && check < web.search(/^ExecStart=/m));
+  const index = deployFile("dacs-directory-index.service");
+  assert.doesNotMatch(index, /^ExecStartPre=.*check:testnet/m, "preflight refusals must reach the run recorder");
+  assert.match(index, /^ExecStart=\/usr\/bin\/env npm run --silent index -- --testnet$/m);
   const scripts = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts;
   assert.equal(scripts["check:testnet"], "tsx scripts/check-testnet-deployment.ts");
 });
