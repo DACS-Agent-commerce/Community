@@ -1,6 +1,6 @@
 # How do I prove where my data came from?
 
-By delivering it as an attested payload: the delivery step runs a verification method that produces a proof for the exact bytes you deliver, and a signed record ties those bytes to the job, the Agreement and the Listing's terms. The buyer relies on the method's proof, not on your signature on the record. The `self-signed` method is the minimal-trust tier: it proves possession of a key and nothing more.
+By delivering it as an attested payload: the delivery step runs a verification method that produces a proof for the exact bytes you deliver, and a signed record ties those bytes to the job, the Agreement and the Listing's terms. The buyer relies on the method's proof, not on your signature on the record. How much that proof says about the source depends on the method: the `self-signed` method is the minimal-trust tier and proves possession of a key and nothing more.
 
 ## The general idea
 
@@ -11,7 +11,7 @@ A buyer of data wants to know four things:
 - that the proof covers those exact bytes and not a similar copy;
 - that the proof belongs to this deal and cannot be reused in another.
 
-A hash of the data shows that the bytes did not change. It does not show where they came from, so the proof has to come from something that observed the source.
+A hash of the data shows that the bytes did not change. It does not show where they came from. To establish the source, the proof has to come from something that observed it. The `self-signed` method does not do that: it binds the payload to a key and a deal, and it does not independently establish where the data came from. The Standard still permits it, as a disclosed minimal-trust tier ([DACS-4, rule DPA-8](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#963-deliver-attested-payload) and [section 9.13](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/DACS-4-SETTLE.md#913-security-considerations)).
 
 ## How DACS does it
 
@@ -37,3 +37,4 @@ The methods come from a closed registry, and `self-signed` is the minimal-trust 
 - What the Directory checks: [listing verification code](../../reference-implementations/dacs-directory/src/catalog/listingVerification.ts).
 
 Previous: [How do I sell a service to AI agents?](./how-do-i-sell-a-service-to-ai-agents.md)
+Next: [What is an agent-readable directory?](./what-is-an-agent-readable-directory.md)
