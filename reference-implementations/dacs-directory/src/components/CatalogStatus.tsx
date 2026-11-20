@@ -28,7 +28,7 @@ export interface Status {
   chainLatestTx: number | null;
   txsBehind: number | null;
   indexer?: {
-    lastRun?: { status: "running" | "complete" | "failed" } | null;
+    lastRun?: { status: "running" | "complete" | "failed"; chain_tip?: number | null } | null;
     listingRejectionDiagnostics?: ListingRejectionDiagnostics;
   };
 }
@@ -101,7 +101,7 @@ export function CatalogStatusView({ status }: { status: Status }) {
   const inSync = behind !== null && behind === 0;
   const cls = behind === null ? "" : inSync ? "ok" : "warn";
   const label = behind === null
-      ? `synced to tx ${status.syncedToTx.toLocaleString()}`
+      ? `chain tip unknown · synced to tx ${status.syncedToTx.toLocaleString()}`
       : inSync
         ? "in sync with chain"
         : `${behind.toLocaleString()} tx${behind === 1 ? "" : "s"} behind chain`;
@@ -113,7 +113,9 @@ export function CatalogStatusView({ status }: { status: Status }) {
         role="status"
         aria-live="polite"
         title={`Catalog scan cursor: tx ${status.syncedToTx.toLocaleString()}${
-          status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : ""
+          status.chainLatestTx !== null ? ` · chain tip: tx ${status.chainLatestTx.toLocaleString()}` : " · chain tip: unknown"
+        }${status.indexer?.lastRun ? ` · last scan tip: ${status.indexer.lastRun.chain_tip == null
+          ? "unknown" : `tx ${status.indexer.lastRun.chain_tip.toLocaleString()}`}` : ""
         } · last indexed ${new Date(status.generatedAt).toLocaleString()}. The catalog is a cache of chain state and is refreshed by the operator.`}
       >
         <span className="sync-dot" />

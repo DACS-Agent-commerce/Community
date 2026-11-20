@@ -337,7 +337,8 @@ export interface ScanState {
   /** Historic values remain readable so migrations can trigger a full replay. */
   schemaVersion?: number;
   lastSeenTxId: number;
-  lastChainTip?: number;
+  /** Tip observed by the last published scan; null means it observed none and never corroborates a reset. */
+  lastChainTip?: number | null;
   /** Newest transaction id and the local time (ms) the indexer first saw it as the newest. */
   tipObservation?: { id: number; since: number };
   /** Wall-clock time when lastSeenTxId most recently increased. */
