@@ -119,7 +119,14 @@ export async function readRequestJson(
   if (!reader) return { ok: true, value: null };
   const chunks: Uint8Array[] = [];
   let bytes = 0;
+  const expiresAt = performance.now() + timeoutMs;
   let timedOut = false;
+  const checkDeadline = () => {
+    if (performance.now() >= expiresAt) {
+      timedOut = true;
+      throw new Error("request body timed out");
+    }
+  };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => { timedOut = true; reject(new Error("request body timed out")); }, timeoutMs);
@@ -128,6 +135,8 @@ export async function readRequestJson(
   try {
     for (;;) {
       const chunk = await Promise.race([reader.read(), deadline]);
+      // A read may resume before an overdue timer gets its turn.
+      checkDeadline();
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
       if (bytes > maxBytes) {
@@ -138,8 +147,11 @@ export async function readRequestJson(
     }
     // Decode the bounded bytes with the native Body JSON algorithm, just as
     // Request.json() did (including this runtime's UTF-8 and BOM handling).
-    try { return { ok: true, value: await new Response(Buffer.concat(chunks, bytes)).json() }; }
-    catch { return { ok: true, value: null }; }
+    let value: unknown = null;
+    try { value = await new Response(Buffer.concat(chunks, bytes)).json(); }
+    catch { /* Preserve route validation of malformed JSON as null. */ }
+    checkDeadline();
+    return { ok: true, value };
   } catch {
     cancel();
     return { ok: false, response: NextResponse.json(
