@@ -259,3 +259,99 @@ for (const anchoredFirst of [false, true]) {
     assert.deepEqual(rows(staleHash), [], "the unrelated successful seller still prunes aged rejected evidence");
   });
 }
+
+
+test("reindex preserves failed and unknown seller aged rejected markers while pruning successful seller aged rejected candidates", async (t) => {
+  let now = 1_840_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  const { PINNED_DEMOS_CHAIN_IDENTITY } = await import("../src/catalog/nodeDeployment.js");
+  const { onPinnedChain } = await import("./fixtures/pinned-node.js");
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const failedHash = "61".repeat(32), staleHash = "71".repeat(32), unknownHash = "81".repeat(32);
+  const failed = catalog(failedHash, "9".repeat(64)).sellers[0];
+  const successful = catalog(staleHash, "a".repeat(64)).sellers[0];
+  successful.primaryClaim = `did:demos:agent:${"b".repeat(64)}`;
+  successful.heldListingVersions = [];
+  // Simulate a corrupt per-seller cached field: indexRegistration throws while
+  // preserving an unread anchor. The reindex caller must isolate this failure.
+  failed.heldListingVersions = {} as typeof failed.heldListingVersions;
+  store.publishCatalogChain({ catalogVersion: "1", generatedAt: now, sellers: [failed, successful] },
+    { ...store.loadScanState(), listings: {}, deals: {}, programs: {}, revocations: {}, verifiedRevocations: {} },
+    PINNED_DEMOS_CHAIN_IDENTITY);
+  store.saveRegistrations([
+    { primaryClaim: failed.primaryClaim, displayName: "failed", listingAnchors: [failed.listings[0].anchor.locator] },
+    { primaryClaim: successful.primaryClaim, displayName: "successful", listingAnchors: [] },
+  ]);
+  for (const [hash, n] of [[failedHash, 41], [staleHash, 42], [unknownHash, 43]] as const) {
+    store.admitRevocationCandidates(hash, [{ locator: locator(n), contentHash: "unchanged" }]);
+  }
+  store.recordRevocationProgress(failedHash, { unread: [], rejected: [locator(41)] });
+  store.recordRevocationProgress(unknownHash, { unread: [], rejected: [locator(43)] });
+  store.recordRevocationProgress(staleHash, { unread: [], rejected: [locator(42)] });
+  now += week;
+  t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+    if (init?.body) return Response.json({ result: 200, response: [] });
+    return new Response("unavailable", { status: 503 });
+  });
+  const logs: string[] = [];
+  const summary = await reindexAll({ log: (line) => logs.push(line), nodeDeployment: onPinnedChain,
+    resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [], errors: [] }) });
+  assert.equal(summary.sellers, 1);
+  assert.ok(logs.some((line) => line.includes("seller indexing failed")), "the production caller caught the indexing exception");
+  assert.deepEqual(store.loadStoredCatalog().sellers.map((seller) => seller.primaryClaim), [successful.primaryClaim]);
+  assert.deepEqual(rows(failedHash), [{ locator: locator(41), state: "rejected" }], "an omitted seller's aged rejected evidence survives");
+  assert.deepEqual(rows(staleHash), [], "a successfully indexed seller's aged rejected candidate is pruned");
+  assert.deepEqual(rows(unknownHash), [{ locator: locator(43), state: "rejected" }], "partial indexing cannot attribute an unknown hash safely");
+});
+
+
+for (const failedFirst of [false, true]) {
+  test(`duplicate registrations retain aged rejected evidence when ${failedFirst ? "failed" : "successful"} registration runs first`, async (t) => {
+    let now = 1_850_000_000_000;
+    t.mock.method(Date, "now", () => now);
+    const { PINNED_DEMOS_CHAIN_IDENTITY } = await import("../src/catalog/nodeDeployment.js");
+    const { onPinnedChain } = await import("./fixtures/pinned-node.js");
+    const { reindexAll } = await import("../src/catalog/reindexCore.js");
+    const failedHash = (failedFirst ? "b1" : "c1").repeat(32);
+    const staleHash = (failedFirst ? "d1" : "e1").repeat(32);
+    const failed = catalog(failedHash, "f".repeat(64)).sellers[0];
+    failed.primaryClaim = `did:demos:agent:${"c".repeat(64)}`;
+    failed.heldListingVersions = [];
+    const unreadAnchor = failed.listings[0].anchor.locator;
+    // A corrupt cached anchor throws only when this registration reads an
+    // unavailable anchor. The duplicate with no anchors still indexes normally.
+    failed.listings[0].anchor = null as unknown as (typeof failed.listings)[number]["anchor"];
+    const successful = catalog(staleHash, "f".repeat(64)).sellers[0];
+    successful.primaryClaim = `did:demos:agent:${"b".repeat(64)}`;
+    successful.heldListingVersions = [];
+    store.publishCatalogChain({ catalogVersion: "1", generatedAt: now, sellers: [failed, successful] },
+      { ...store.loadScanState(), listings: {}, deals: {}, programs: {}, revocations: {}, verifiedRevocations: {} },
+      PINNED_DEMOS_CHAIN_IDENTITY);
+    const duplicates = [
+      { primaryClaim: failed.primaryClaim, displayName: "successful duplicate", listingAnchors: [] },
+      { primaryClaim: failed.primaryClaim, displayName: "failed duplicate", listingAnchors: [unreadAnchor] },
+    ];
+    store.saveRegistrations([
+      ...(failedFirst ? duplicates.toReversed() : duplicates),
+      { primaryClaim: successful.primaryClaim, displayName: "successful seller", listingAnchors: [] },
+    ]);
+    store.admitRevocationCandidates(failedHash, [{ locator: locator(51), contentHash: "unchanged" }]);
+    store.admitRevocationCandidates(staleHash, [{ locator: locator(52), contentHash: "unchanged" }]);
+    store.recordRevocationProgress(failedHash, { unread: [], rejected: [locator(51)] });
+    store.recordRevocationProgress(staleHash, { unread: [], rejected: [locator(52)] });
+    now += week;
+    t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+      if (init?.body) return Response.json({ result: 200, response: [] });
+      return new Response("unavailable", { status: 503 });
+    });
+    const logs: string[] = [];
+    const summary = await reindexAll({ log: (line) => logs.push(line), nodeDeployment: onPinnedChain,
+      resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [], errors: [] }) });
+    assert.equal(summary.sellers, 2, "one duplicate and the unrelated seller indexed successfully");
+    assert.equal(logs.filter((line) => line.includes("seller indexing failed")).length, 1,
+      "exactly one duplicate reached the production exception handler");
+    assert.deepEqual(rows(failedHash), [{ locator: locator(51), state: "rejected" }], "any failed registration protects this seller's aged rejected marker");
+    assert.deepEqual(rows(staleHash), [], "the unrelated successful seller can still prune aged rejected evidence");
+  });
+}
+
