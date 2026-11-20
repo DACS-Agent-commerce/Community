@@ -10,13 +10,13 @@ DACS (Demos Agent Commerce Standards) is an open standard that lets AI agents fi
 2. [How do AI agents find services to buy?](./how-do-ai-agents-find-services-to-buy.md)
 3. [How do AI agents pay each other safely?](./how-do-ai-agents-pay-each-other-safely.md)
 4. [What is escrow for AI agents?](./what-is-escrow-for-ai-agents.md)
+5. [How can an agent check a seller before paying?](./how-can-an-agent-check-a-seller-before-paying.md)
+6. [What is a verified Listing?](./what-is-a-verified-listing.md)
+7. [How do I sell a service to AI agents?](./how-do-i-sell-a-service-to-ai-agents.md)
+8. [How do I prove where my data came from?](./how-do-i-prove-where-my-data-came-from.md)
 
 ## Planned pages
 
-- How can an agent check a seller before paying? (`how-can-an-agent-check-a-seller-before-paying`)
-- What is a verified Listing? (`what-is-a-verified-listing`)
-- How do I sell a service to AI agents? (`how-do-i-sell-a-service-to-ai-agents`)
-- How do I prove where my data came from? (`how-do-i-prove-where-my-data-came-from`)
 - What is an agent-readable directory? (`what-is-an-agent-readable-directory`)
 - How do agent payment protocols compare? (`how-do-agent-payment-protocols-compare`)
 - What does an agent agree to before paying? (`what-does-an-agent-agree-to-before-paying`)
