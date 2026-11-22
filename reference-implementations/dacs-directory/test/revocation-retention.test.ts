@@ -260,6 +260,46 @@ for (const anchoredFirst of [false, true]) {
   });
 }
 
+test("malformed cached held versions isolate a single registration with no anchors", async (t) => {
+  let now = 1_865_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  const { PINNED_DEMOS_CHAIN_IDENTITY } = await import("../src/catalog/nodeDeployment.js");
+  const { onPinnedChain } = await import("./fixtures/pinned-node.js");
+  const { reindexAll } = await import("../src/catalog/reindexCore.js");
+  const failedHash = "91".repeat(32);
+  const staleHash = "92".repeat(32);
+  const failed = catalog(failedHash, "14".repeat(32)).sellers[0];
+  failed.primaryClaim = `did:demos:agent:${"d".repeat(64)}`;
+  failed.heldListingVersions = {} as typeof failed.heldListingVersions;
+  const successful = catalog(staleHash, "15".repeat(32)).sellers[0];
+  successful.primaryClaim = `did:demos:agent:${"e".repeat(64)}`;
+  successful.heldListingVersions = [];
+  store.publishCatalogChain({ catalogVersion: "1", generatedAt: now, sellers: [failed, successful] },
+    { ...store.loadScanState(), listings: {}, deals: {}, programs: {}, revocations: {}, verifiedRevocations: {} },
+    PINNED_DEMOS_CHAIN_IDENTITY);
+  store.saveRegistrations([
+    { primaryClaim: failed.primaryClaim, displayName: "single no-anchor registration", listingAnchors: [] },
+    { primaryClaim: successful.primaryClaim, displayName: "unrelated seller", listingAnchors: [] },
+  ]);
+  store.admitRevocationCandidates(failedHash, [{ locator: locator(65), contentHash: "unchanged" }]);
+  store.admitRevocationCandidates(staleHash, [{ locator: locator(66), contentHash: "unchanged" }]);
+  store.recordRevocationProgress(staleHash, { unread: [], rejected: [locator(66)] });
+  now += week;
+  t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+    if (init?.body) return Response.json({ result: 200, response: [] });
+    return new Response("unavailable", { status: 503 });
+  });
+  const logs: string[] = [];
+  const summary = await reindexAll({ log: (line) => logs.push(line), nodeDeployment: onPinnedChain,
+    resolveIdentities: async () => [], crawlWellKnown: async () => ({ agents: [], errors: [] }) });
+  assert.equal(summary.sellers, 1, "the run completes with the unrelated seller");
+  assert.equal(logs.filter((line) => line.includes("seller indexing failed")).length, 1,
+    "the single no-anchor registration uses the per-seller failure handler");
+  assert.deepEqual(store.loadStoredCatalog().sellers.map((seller) => seller.primaryClaim), [successful.primaryClaim]);
+  assert.equal(rows(failedHash).length, 1, "the failed seller's aged pending marker survives");
+  assert.deepEqual(rows(staleHash), [], "the unrelated successful seller still prunes aged rejected evidence");
+});
+
 
 test("reindex preserves failed and unknown seller aged rejected markers while pruning successful seller aged rejected candidates", async (t) => {
   let now = 1_840_000_000_000;
