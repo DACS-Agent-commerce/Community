@@ -63,7 +63,7 @@ these units or remove that `ExecStartPre` line and accept the unpinned runtime. 
 - `systemctl list-timers dacs-directory-index.timer` shows the next pass within five minutes.
 - `journalctl -u dacs-directory-index.service` shows each pass, or the startup refusal.
 - `https://directory.example.org/api/dacs/status` reports the latest scan run. A testnet
-  startup refusal records a finished `indexer.lastRun` with `status: "failed"`, no
+  startup refusal records a finished `lastRun` under `indexer` with `status: "failed"`, no
   transactions or artifacts scanned, and the saved cursor unchanged. Its detailed
   reason stays in the journal and operator-only database error field.
 
