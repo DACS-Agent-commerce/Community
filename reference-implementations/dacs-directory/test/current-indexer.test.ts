@@ -8,7 +8,7 @@ import { ed25519Sign, privateKeyFromSeed, publicKeyFromSeed, rawPublicKey } from
 import { artifactHash, signedScope, verifiedDiscoveryAgreement } from "../src/catalog/evidenceGraph.js";
 import { agreementRail } from "../src/catalog/agreementMetadata.js";
 import { currentBundleCopiesDiverge, reconcileCurrentCopies } from "../src/catalog/currentReconciliation.js";
-import { deriveIdentityTier, type RecipePolicy } from "../src/catalog/identityVerification.js";
+import { deriveIdentityTier, resolveConfiguredRecipe, type RecipePolicy } from "../src/catalog/identityVerification.js";
 import {
   listingBindingRejection,
 } from "../src/catalog/indexer.js";
@@ -1048,6 +1048,67 @@ test("identity tier refuses a VerifyResult whose method is not a string, even on
   assert.equal(await tier(await claim("key", "k1", 1)), "self-declared", "number method");
   assert.equal(await tier(await claim("domain", "example.com", "domain-tls-control"), await claim("lei", "123", ["consensus-backed-proxy"])), "verified",
     "an array-method claim does not lift a verified claim to institutional");
+});
+
+// DACS-1 §6.3.1: parsers treat Scheme case-insensitively on read. CORE §B.1 CF-2(a) compares it lowercased.
+const schemeCaseFixture = async () => {
+  maps.clear(); const attested = { authority: "ok" }; maps.set(locator(8), attested);
+  const policies: Record<string, RecipePolicy> = {
+    lei: { scheme: "lei", recipeVersion: 2, methods: ["consensus-backed-proxy"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] },
+    domain: { scheme: "domain", recipeVersion: 2, methods: ["domain-tls-control"], defaultMaxAgeSec: 60, availability: "live", trustedResultSigners: [dids[0]] },
+  };
+  let next = 20;
+  // Each result is signed by the trusted signer and hash-bound by its reference; only letter case differs from the controls.
+  const claim = async (claimRef: unknown, resultScheme: unknown, identifier: string, method: string) => {
+    const resultScope: Obj = { resultVersion: "1", scheme: resultScheme, identifier, recipeVersion: 2, method, decision: "pass", reason: "found",
+      attestation: { anchor: { kind: "storage-program", locator: locator(8) }, contentHash: contentHash(attested) }, fetchedAt: 10, verifiedAt: 20, validUntil: 200 };
+    const result: Obj = { ...resultScope, signature: await sign(resultScope, "verify-result", 0) };
+    const at = locator(next++); maps.set(at, result);
+    return { ref: claimRef, verifiedBy: ref(at, result, "verify-result", { recipeVersion: 2 }) };
+  };
+  const read = async (at: string) => maps.get(at) ?? null;
+  return { policies, claim, read };
+};
+
+test("identity tier gives the institutional tier to an institutional scheme written in any letter case", async () => {
+  const { policies, claim, read } = await schemeCaseFixture();
+  // This resolver ignores case, so only the institutional check decides between verified and institutional.
+  const tier = async (...claims: Obj[]) => deriveIdentityTier({ claims }, async (scheme) => policies[scheme.toLowerCase()] ?? null, 100, read);
+  assert.equal(await tier(await claim("lei:123", "lei", "123", "consensus-backed-proxy")), "institutional", "control: lowercase");
+  assert.equal(await tier(await claim("LEI:123", "LEI", "123", "consensus-backed-proxy")), "institutional", "LEI");
+  assert.equal(await tier(await claim("Lei:123", "Lei", "123", "consensus-backed-proxy")), "institutional", "Lei");
+  assert.equal(await tier(await claim({ scheme: "LEI", identifier: "123" }, "LEI", "123", "consensus-backed-proxy")), "institutional", "object form");
+  assert.equal(await tier(await claim("domain:example.com", "domain", "example.com", "domain-tls-control"),
+    await claim("LEI:123", "LEI", "123", "consensus-backed-proxy")), "institutional", "a mixed-case institutional claim beside a verified one");
+});
+
+test("identity tier looks up the recipe by the lowercase scheme", async () => {
+  const { policies, claim, read } = await schemeCaseFixture();
+  const asked: string[] = [];
+  const tier = (claimObj: Obj) => deriveIdentityTier({ claims: [claimObj] }, async (scheme) => { asked.push(scheme); return policies[scheme] ?? null; }, 100, read);
+  assert.equal(await tier(await claim("Domain:example.com", "Domain", "example.com", "domain-tls-control")), "verified", "Domain");
+  assert.deepEqual(asked, ["domain"]);
+  // The configured resolver keeps its exact lookup: policy schemes are lowercase, as recipe admission requires (recipePolicy.ts).
+  const old = process.env.DACS_RECIPE_POLICIES;
+  try {
+    process.env.DACS_RECIPE_POLICIES = JSON.stringify([policies.lei]);
+    assert.equal(await deriveIdentityTier({ claims: [await claim("LEI:123", "LEI", "123", "consensus-backed-proxy")] }, resolveConfiguredRecipe, 100, read),
+      "institutional", "configured resolver, lowercase policy");
+    process.env.DACS_RECIPE_POLICIES = JSON.stringify([{ ...policies.lei, scheme: "LEI" }]);
+    assert.equal(await deriveIdentityTier({ claims: [await claim("lei:123", "lei", "123", "consensus-backed-proxy")] }, resolveConfiguredRecipe, 100, read),
+      "self-declared", "a policy keyed by an uppercase scheme is not selected, as in recipe admission");
+  } finally { if (old === undefined) delete process.env.DACS_RECIPE_POLICIES; else process.env.DACS_RECIPE_POLICIES = old; }
+});
+
+test("identity tier compares the stored VerifyResult scheme with the claim scheme case-insensitively", async () => {
+  const { policies, claim, read } = await schemeCaseFixture();
+  const tier = async (claimObj: Obj) => deriveIdentityTier({ claims: [claimObj] }, async (scheme) => policies[scheme] ?? null, 100, read);
+  assert.equal(await tier(await claim("LEI:123", "lei", "123", "consensus-backed-proxy")), "institutional", "mixed-case claim, lowercase result");
+  assert.equal(await tier(await claim("lei:123", "LEI", "123", "consensus-backed-proxy")), "institutional", "lowercase claim, mixed-case result");
+  assert.equal(await tier(await claim("LEI:123", "finra-crd", "123", "consensus-backed-proxy")), "self-declared", "a different scheme still fails");
+  assert.equal(await tier(await claim("LEI:123", "lei-x", "123", "consensus-backed-proxy")), "self-declared", "a longer scheme still fails");
+  for (const scheme of [["lei"], { scheme: "lei" }, 1, null])
+    assert.equal(await tier(await claim("lei:123", scheme, "123", "consensus-backed-proxy")), "self-declared", `result scheme ${JSON.stringify(scheme)}`);
 });
 
 test("fixed-price negotiation of a negotiable band requires the exact decimal center and currency", async () => {
