@@ -21,9 +21,9 @@ DACS (Demos Agent Commerce Standards) is an open standard that lets AI agents fi
 
 ## Words used on these pages
 
-These words mean the same thing on every page. They follow the [Standard's glossary](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/GLOSSARY.md).
+These words mean the same thing on every page. Listing, Agreement, Rail, Settlement evidence and Anchored below are plain-language summaries of entries in the [Standard's glossary](https://github.com/DACS-Agent-commerce/DACS-Standard/blob/d45c0a292006b2fd2e40d2dbe0cd7ed518ad0f20/spec/GLOSSARY.md). Escrow, Standard and Directory are terms defined here for this repository.
 
-- **Listing:** a seller's signed, anchored description of what it sells.
+- **Listing:** a signed, anchored description published by one party of what it offers or needs.
 - **Agreement:** the signed final terms between a buyer and a seller.
 - **Rail:** one way to pay, defined by a network, an asset and a settlement method.
 - **Settlement evidence:** the record that every payment and delivery step produces.
