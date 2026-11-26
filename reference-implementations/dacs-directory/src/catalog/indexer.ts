@@ -156,6 +156,34 @@ export function listingBindingRejection(
   return null;
 }
 
+/** A bundle side the indexer refused for a deal: which copy, for which job and role, and why. */
+export interface BundleRefusal {
+  jobId: string;
+  role: BundleBinding["role"];
+  /** The bound copy's storage locator (the binding's native address). */
+  locator: string;
+  reason: string;
+}
+
+/**
+ * Why a bound current bundle copy is refused for its binding, or null when it is accepted: the evidence
+ * graph's own reason when the graph failed, otherwise a fixed text for the check that failed.
+ */
+export function bundleSideRefusal(graph: EvidenceGraph, binding: BundleBinding): string | null {
+  if (!graph.ok) return graph.reason ?? "evidence graph failed verification";
+  if (!graph.signaturesVerified) return "bundle signatures are not verified";
+  if (graph.bundle.jobId !== binding.jobId) return "bundle job id does not match the binding";
+  if (graph.bundle.anchoredByRole !== binding.role) return "bundle anchoring role does not match the binding role";
+  const parties = Array.isArray(graph.bundle.parties) ? graph.bundle.parties : [];
+  const roleHolder = parties.find((party): party is Record<string, unknown> =>
+    Boolean(party && typeof party === "object" && !Array.isArray(party)) && (party as Record<string, unknown>).role === binding.role)
+    ?.primaryClaim;
+  if (typeof roleHolder !== "string" || canonicalDemosAgentClaim(roleHolder) !== canonicalDemosAgentClaim(binding.signer)) {
+    return "bundle role holder is not the binding signer";
+  }
+  return null;
+}
+
 /**
  * Index one registration into a verified SellerRecord.
  *
@@ -164,6 +192,7 @@ export function listingBindingRejection(
  * authenticator for finalized commitments; omitting it withholds committed credit.
  * `replayingHistory` is true while the scan state is rebuilt from genesis (after a chain reset or before
  * a complete pass on this chain): the prior catalog is then not evidence, so no Listing is kept for an unread anchor.
+ * `onBundleRefused` hears each bound current bundle copy refused for a deal, with the reason (#354).
  */
 export async function indexRegistration(
   reg: Registration,
@@ -175,6 +204,7 @@ export async function indexRegistration(
   commitment?: CommitmentVerifier,
   scanState: ReturnType<typeof loadScanState> = loadScanState(),
   replayingHistory = false,
+  onBundleRefused?: (refusal: BundleRefusal) => void,
 ): Promise<SellerRecord> {
   const now = Date.now();
   // Owner evidence comes from what the owner signed, never from crawl data merged into `reg`.
@@ -518,13 +548,11 @@ export async function indexRegistration(
           ? graph.bundle.parties.filter((party): party is Record<string, unknown> =>
             Boolean(party && typeof party === "object" && !Array.isArray(party)))
           : [];
-        const roleHolder = parties.find((party) => party.role === binding.role)?.primaryClaim;
-        if (
-          !graph.ok || !graph.signaturesVerified || graph.bundle.jobId !== binding.jobId ||
-          graph.bundle.anchoredByRole !== binding.role ||
-          typeof roleHolder !== "string" ||
-          canonicalDemosAgentClaim(roleHolder) !== canonicalDemosAgentClaim(binding.signer)
-        ) return null;
+        const refusal = bundleSideRefusal(graph, binding);
+        if (refusal !== null) {
+          onBundleRefused?.({ jobId: binding.jobId, role: binding.role, locator: binding.nativeAddress, reason: refusal });
+          return null;
+        }
         const signed = new Set(
           (Array.isArray(graph.bundle.signatures) ? graph.bundle.signatures : [])
             .map((signature) => signature && typeof signature === "object" && !Array.isArray(signature)
