@@ -5,15 +5,17 @@ These files run the Directory on one server with systemd and Caddy:
 | File | Role |
 |---|---|
 | `dacs-directory.service` | The web server on `127.0.0.1:$PORT` |
-| `dacs-directory-index.service` | One catalog index pass (`npm run index`) |
+| `dacs-directory-index.service` | One catalog index pass (`npm run index -- --testnet`) |
 | `dacs-directory-index.timer` | Starts an index pass every five minutes (`OnCalendar=*:0/5`) |
 | `directory.env.example` | Settings for both units (placeholders only) |
 | `Caddyfile.example` | TLS and reverse proxy to the web server |
 
 ## Testnet only
 
-Both units run `npm run check:testnet -- --built` before they start
-(`scripts/check-testnet-deployment.ts`). It refuses to start when:
+The web unit runs `npm run check:testnet -- --built` before starting
+(`scripts/check-testnet-deployment.ts`). The index unit runs `npm run index -- --testnet`,
+which performs the same compiled-manifest and testnet checks inside the `reindex`
+data lease before any new scan work. Both refuse when:
 
 - `DACS_DIRECTORY_NETWORK` is not exactly `testnet` (`mainnet` included);
 - `DEMOS_RPC` or `NEXT_PUBLIC_DEMOS_RPC` is missing, is not a credential-free
@@ -60,7 +62,15 @@ these units or remove that `ExecStartPre` line and accept the unpinned runtime. 
 
 - `systemctl list-timers dacs-directory-index.timer` shows the next pass within five minutes.
 - `journalctl -u dacs-directory-index.service` shows each pass, or the startup refusal.
-- `https://directory.example.org/api/dacs/status` reports the latest scan run.
+- `https://directory.example.org/api/dacs/status` reports the latest scan run. A testnet
+  startup refusal records a finished `lastRun` under `indexer` with `status: "failed"`, no
+  transactions or artifacts scanned, and the saved cursor unchanged. Its detailed
+  reason stays in the journal and operator-only database error field.
+
+The index CLI first rolls back provisional chain reads left by an interrupted pass,
+as it does for an ordinary reindex; the refusal records the restored saved cursor.
+A runtime precheck failure or a database that cannot be opened still appears only
+in the journal, because the indexer cannot record a run in those cases.
 
 The catalog lives in `/var/lib/dacs-directory`. Do not copy `data/registrations.example.json`
 there: the testnet catalog starts empty and fills from registrations and the chain scan.
@@ -95,7 +105,8 @@ journalctl -fu dacs-directory-index.service
 ```
 
 The same unit still runs as `dacs-directory`, loads `directory.env`, and runs its
-runtime and testnet preflight checks. The timer stays stopped during bootstrap.
+runtime precheck and the index command's testnet preflight inside the data lease.
+The timer stays stopped during bootstrap.
 Interrupting `journalctl` only stops watching logs. Inspect `systemctl status dacs-directory-index.service` and the journal for successful completion (exit
 status 0 and `catalog written`); check `/api/dacs/status` for scan progress.
 Do not restart scheduling after a failed or still-running pass. To abort a hung

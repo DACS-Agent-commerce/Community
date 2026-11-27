@@ -164,6 +164,7 @@ async function cliFailure(callback: string): Promise<ChildResult> {
     writeFileSync(join(directory, "package.json"), '{"type":"module"}');
     writeFileSync(join(directory, "reindex.mjs"), cli);
     writeFileSync(join(directory, "store.js"), `export * from ${JSON.stringify(storeUrl)};`);
+    writeFileSync(join(directory, "builtPublicRpc.js"), `export async function checkBuiltTestnetStartup() { throw new Error("unused without --testnet"); }`);
     writeFileSync(join(directory, "reindexCore.js"), `
       import { withDataLock } from ${JSON.stringify(storeUrl)};
       export async function reindexAll() { ${callback} }
