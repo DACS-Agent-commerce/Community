@@ -59,7 +59,8 @@ export interface ScannedArtifacts {
   highestTxId: number;
   /** True only when the walk reached sinceTxId/genesis rather than maxTxs/error. */
   complete: boolean;
-  chainTip: number;
+  /** Diagnostic tip; never inferred from the scan cursor. */
+  chainTip: number | null;
   /** Null unless the scan actually observed a valid tip. */
   observedTip: number | null;
   /** First sighting of the newest id to store with the scan state; null when no valid tip was read. */
@@ -493,12 +494,12 @@ export async function scanChain(
   let scanned = 0;
   let highestTxId = since;
   let complete = false;
-  let chainTip = since;
   let observedTip: number | null = null;
   let scanError: string | undefined;
   const rule = finalityRule();
   let tipObservation: TipObservation | null = null;
-  let settled = Math.max(0, chainTip - rule.depth);
+  // Numeric working bound stays separate from nullable observed diagnostics.
+  let settled = Math.max(0, since - rule.depth);
 
   let cursor: number | "latest" = "latest";
   const PAGE = 100;
@@ -521,7 +522,6 @@ export async function scanChain(
         scanError = `the newest transaction id ${String(newest)} is not a non-negative safe integer`;
         break;
       }
-      chainTip = newest;
       observedTip = newest;
       const seen = observeTip(opts.tipObservation, newest, opts.now);
       tipObservation = seen.observation;
@@ -710,5 +710,5 @@ export async function scanChain(
   return { listings, deals, programs,
     revocations: new Map([...revocations].map(([hash, candidates]) => [hash, [...candidates].reverse()])),
     unreadRevocationMarkers, bundleBindings, bundleBindingOverflow, omittedBindings,
-    txsScanned: scanned, highestTxId, complete, chainTip, observedTip, tipObservation, observations, failures, scanError };
+    txsScanned: scanned, highestTxId, complete, chainTip: observedTip, observedTip, tipObservation, observations, failures, scanError };
 }

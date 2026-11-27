@@ -1518,7 +1518,7 @@ export const artifactOwner = (locator: string): string | null => {
 export function beginScanRun(fromTx: number): number {
   return Number(db.prepare("INSERT INTO scan_runs(started_at,from_tx,status) VALUES (?,?,?)").run(Date.now(), fromTx, "running").lastInsertRowid);
 }
-export function finishScanRun(id: number, values: { toTx: number; chainTip?: number; txs: number; artifacts: number; rejected: number; error?: string; omittedSellers?: number; omittedBindings?: number; omittedDeals?: number }): void {
+export function finishScanRun(id: number, values: { toTx: number; chainTip?: number | null; txs: number; artifacts: number; rejected: number; error?: string; omittedSellers?: number; omittedBindings?: number; omittedDeals?: number }): void {
   db.prepare(`UPDATE scan_runs SET finished_at=?,to_tx=?,chain_tip=?,txs_scanned=?,artifacts_observed=?,rejected=?,status=?,error=?,omitted_sellers=?,omitted_bindings=?,omitted_deals=? WHERE id=?`)
     .run(Date.now(), values.toTx, values.chainTip ?? null, values.txs, values.artifacts, values.rejected,
       values.error ? "failed" : "complete", values.error ?? null, values.omittedSellers ?? 0, values.omittedBindings ?? 0, values.omittedDeals ?? 0, id);

@@ -355,6 +355,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     // after the configured interval instead of remaining "unknown" forever.
     else state.cursorAdvancedAt ??= Date.now();
     state.lastSeenTxId = nextCursor;
+    // This scan's observation, not a carried prior tip or the numeric resume cursor.
     state.lastChainTip = scan.chainTip;
     if (scan.tipObservation) state.tipObservation = scan.tipObservation;
     finishWithdrawalCarriageReplay();
