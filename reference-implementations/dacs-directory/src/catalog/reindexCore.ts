@@ -156,6 +156,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     invalidateCatalogChain(served.chainIdentity);
     openChainReadWindow();
     const regs: (Registration & { discovered?: boolean })[] = [];
+    const failedSellerClaims = new Set<string>();
     for (const raw of loadRegistrations()) {
       // The registration and its binding count are checked before any binding is verified;
       // admitted bindings are then verified one at a time.
@@ -172,6 +173,10 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
         parsed = parseRegistration({ ...raw, bundleBindings: bindings });
       }
       if (!parsed.ok) {
+        if (typeof raw?.primaryClaim === "string") {
+          const identity = canonicalDemosAgentClaim(raw.primaryClaim);
+          if (identity) failedSellerClaims.add(identity);
+        }
         omitted.omittedSellers++;
         const claim = typeof raw?.primaryClaim === "string" ? raw.primaryClaim.slice(0, 24) : "invalid claim";
         log(`seller indexing failed (${claim}), omitted from this catalog: ${parsed.error}`);
@@ -457,6 +462,7 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
     const allRegs = [...regs, ...discovered.values()];
 
     const sellers = [];
+    const indexedHashesBySeller = new Map<string, string[]>();
     for (const reg of allRegs) {
       const before = prior.sellers.find((s) => s.primaryClaim === reg.primaryClaim);
       log(`indexing ${reg.displayName} (${reg.primaryClaim.slice(0, 24)}…)`);
@@ -464,9 +470,20 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       const record = await indexRegistration(reg, before, opts.resolveIdentities, opts.resolveRecipe, (kind, count) => {
         if (kind === "bindings") omitted.omittedBindings += count;
         else omitted.omittedDeals += count;
-      }, undefined, opts.commitment, state, needsHistoryReplay).catch((error: unknown) => {
+      }, undefined, opts.commitment, state, needsHistoryReplay).then((record) => {
+        // Collect by identity, then exclude failures after ALL registrations. A
+        // successful duplicate must not authorize pruning a failed sibling.
+        const hashes = indexedHashesBySeller.get(reg.primaryClaim) ?? [];
+        hashes.push(...[before, record].flatMap((seller) => seller ? [
+          ...seller.listings.map((listing) => listing.contentHash),
+          ...(seller.heldListingVersions ?? []).map((listing) => listing.contentHash),
+        ] : []));
+        indexedHashesBySeller.set(reg.primaryClaim, hashes);
+        return record;
+      }).catch((error: unknown) => {
         throwIfInfrastructureError(error);
         omitted.omittedSellers++;
+        failedSellerClaims.add(reg.primaryClaim);
         const reason = error instanceof Error ? error.message.slice(0, 200) : "unknown error";
         log(`  seller indexing failed (${reg.primaryClaim.slice(0, 24)}…), omitted from this catalog: ${reason}`);
         return null;
@@ -480,6 +497,9 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
       );
       sellers.push(record);
     }
+    const successfullyIndexedHashes = [...indexedHashesBySeller]
+      .filter(([claim]) => !failedSellerClaims.has(claim))
+      .flatMap(([, hashes]) => hashes);
 
     const generatedAt = Date.now();
     const fixtureSeeds = loadFixtureSeeds();
@@ -518,7 +538,8 @@ export async function reindexAll(opts: ReindexOptions = {}): Promise<ReindexSumm
             (prior.scanProgress?.cursor ?? -1) > state.lastSeenTxId
             ? state.cursorAdvancedAt ?? null
             : prior.scanProgress?.cursorAdvancedAt ?? null,
-          lastSuccessfulFullScanAt: completedAt, fromTx: sinceTxId } }, state, served.chainIdentity);
+          lastSuccessfulFullScanAt: completedAt, fromTx: sinceTxId } }, state, served.chainIdentity, !crawlIncomplete,
+        omitted.omittedSellers > 0 ? successfullyIndexedHashes : undefined);
       finishScanRun(runId, { ...omitted, toTx: state.lastSeenTxId, chainTip: completedScan.chainTip, txs: completedScan.txsScanned,
         artifacts: completedScan.observations.length, rejected: completedScan.failures.length });
     });
