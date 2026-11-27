@@ -27,14 +27,15 @@ export type ResolveRecipe = (scheme: string, version: number) => Promise<RecipeP
 /** Identity-tier derivation reads the same operator policy as recipe admission, including its authority-scheme check. */
 export { resolveConfiguredRecipe };
 
+/** The scheme is lowercased: DACS-1 §6.3.1 reads it case-insensitively, and CORE §B.1 CF-2(a) compares it lowercased. */
 function claimParts(ref: unknown): { scheme: string; identifier: string } | null {
   if (typeof ref === "string") {
     const at = ref.indexOf(":");
-    return at > 0 ? { scheme: ref.slice(0, at), identifier: ref.slice(at + 1) } : null;
+    return at > 0 ? { scheme: ref.slice(0, at).toLowerCase(), identifier: ref.slice(at + 1) } : null;
   }
   const value = obj(ref);
   return value && typeof value.scheme === "string" && typeof value.identifier === "string"
-    ? { scheme: value.scheme, identifier: value.identifier } : null;
+    ? { scheme: value.scheme.toLowerCase(), identifier: value.identifier } : null;
 }
 
 async function verifiedClaim(
@@ -48,7 +49,7 @@ async function verifiedClaim(
   if (!parts || !ref || !isCurrentRef(ref) || !Number.isSafeInteger(ref.recipeVersion)) return null;
   const raw = await read(ref.anchor.locator); if (!raw) return null;
   if (artifactHash(raw, "verify-result") !== ref.contentHash) return null;
-  if (raw.resultVersion !== "1" || raw.scheme !== parts.scheme || raw.identifier !== parts.identifier ||
+  if (raw.resultVersion !== "1" || typeof raw.scheme !== "string" || raw.scheme.toLowerCase() !== parts.scheme || raw.identifier !== parts.identifier ||
       raw.decision !== "pass" || raw.recipeVersion !== ref.recipeVersion || typeof raw.verifiedAt !== "number") return null;
   const signature = obj(raw.signature);
   if (!signature || !(await verifyComponentSignature(raw, "verify-result", signature, resolveKey))) return null;
